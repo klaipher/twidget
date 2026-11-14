@@ -916,6 +916,11 @@ namespace litehtml
             element::ptr        m_hit;
             bool                m_cache_groups = false;
             position            m_cache_bounds;
+            // Telegram (VENDOR.md edit 38): what is left of this paint's share of the document's budget of elements drawn
+            // inside <use> instances (el_svg::use_budget). It bounds a <use> chain's exponential fan-out: the depth limit
+            // alone does not, and a budget per painter let every <svg> of a document draw it again.
+            static constexpr int kMaxUseElements = 8192;
+            int                  m_use_elements  = kMaxUseElements;
 
             bool hits(float x0, float y0, float x1, float y1, float slop) const
             {
@@ -1044,6 +1049,12 @@ namespace litehtml
             }
 
           public:
+            // Telegram (VENDOR.md edit 38): the document's budget of elements drawn inside instances; this paint's share
+            // of it, and what is left.
+            static int max_use_elements() { return kMaxUseElements; }
+            void       set_use_budget(int elements) { m_use_elements = elements; }
+            int        use_budget_left() const { return m_use_elements; }
+
             svg_painter(document_container* container, uint_ptr hdc, const float view[4], const position* cache_bounds = nullptr) :
                 m_container(container),
                 m_hdc(hdc)
@@ -1110,7 +1121,7 @@ namespace litehtml
                 const char* href = use->get_attr("href");
                 if(!href)
                     href = use->get_attr("xlink:href");
-                if(!href || href[0] != '#' || !href[1] || depth > 8)
+                if(!href || href[0] != '#' || !href[1] || depth > 8 || m_use_elements <= 0)
                     return;
                 element::ptr target;
                 if(auto root = use->get_document()->root())
@@ -1157,6 +1168,9 @@ namespace litehtml
             void draw_child(const element::ptr& child, int inherited, int depth)
             {
                 const float diag = std::sqrt((m_view[2] * m_view[2] + m_view[3] * m_view[3]) / 2);
+                // Telegram (VENDOR.md edit 38): every element drawn inside an instance spends the document's budget.
+                if(depth > 0 && --m_use_elements < 0)
+                    return;
                 {
                     if(child->is_text() || child->css().get_display() == display_none || attribute_hides(child))
                     {
@@ -1509,6 +1523,150 @@ namespace litehtml
         return true;
     }
 
+    // Telegram (VENDOR.md edit 72): moved here from WidgetRuntime's RenderTree (its getBBox), so the painter's fill box and
+    // the queries share one box.
+    bool svg_path_bounds(const vector_path& path, float box[4])
+    {
+        double minX = INFINITY, minY = INFINITY, maxX = -INFINITY, maxY = -INFINITY;
+        auto   add = [&](double x, double y) {
+            minX = std::min(minX, x);
+            minY = std::min(minY, y);
+            maxX = std::max(maxX, x);
+            maxY = std::max(maxY, y);
+        };
+        // The roots in (0, 1) of a t^2 + b t + c.
+        auto roots = [](double a, double b, double c, double out[2]) {
+            int n = 0;
+            if(std::fabs(a) < 1e-12)
+            {
+                if(std::fabs(b) > 1e-12)
+                {
+                    out[n++] = -c / b;
+                }
+            } else
+            {
+                const double d = b * b - 4 * a * c;
+                if(d >= 0)
+                {
+                    out[n++] = (-b + std::sqrt(d)) / (2 * a);
+                    out[n++] = (-b - std::sqrt(d)) / (2 * a);
+                }
+            }
+            int kept = 0;
+            for(int i = 0; i < n; i++)
+            {
+                if(out[i] > 0 && out[i] < 1)
+                {
+                    out[kept++] = out[i];
+                }
+            }
+            return kept;
+        };
+        double                    cx = 0, cy = 0;
+        size_t                    k  = 0;
+        const std::vector<float>& p  = path.points;
+        for(vector_path::op_t op : path.ops)
+        {
+            switch(op)
+            {
+            case vector_path::move:
+            case vector_path::line:
+                cx = p[k];
+                cy = p[k + 1];
+                add(cx, cy);
+                k += 2;
+                break;
+            case vector_path::quad:
+            {
+                const double x1 = p[k], y1 = p[k + 1], x2 = p[k + 2], y2 = p[k + 3];
+                add(x2, y2);
+                for(int axis = 0; axis < 2; axis++)
+                {
+                    const double a0 = axis ? cy : cx, a1 = axis ? y1 : x1, a2 = axis ? y2 : x2;
+                    const double denominator = a0 - 2 * a1 + a2;
+                    if(std::fabs(denominator) > 1e-12)
+                    {
+                        const double t = (a0 - a1) / denominator;
+                        if(t > 0 && t < 1)
+                        {
+                            const double u = 1 - t;
+                            add(u * u * cx + 2 * u * t * x1 + t * t * x2, u * u * cy + 2 * u * t * y1 + t * t * y2);
+                        }
+                    }
+                }
+                cx = x2;
+                cy = y2;
+                k += 4;
+                break;
+            }
+            case vector_path::cubic:
+            {
+                const double x1 = p[k], y1 = p[k + 1], x2 = p[k + 2], y2 = p[k + 3], x3 = p[k + 4], y3 = p[k + 5];
+                add(x3, y3);
+                for(int axis = 0; axis < 2; axis++)
+                {
+                    const double a0 = axis ? cy : cx, a1 = axis ? y1 : x1, a2 = axis ? y2 : x2, a3 = axis ? y3 : x3;
+                    double       ts[2];
+                    const int    n = roots(-a0 + 3 * a1 - 3 * a2 + a3, 2 * (a0 - 2 * a1 + a2), a1 - a0, ts);
+                    for(int i = 0; i < n; i++)
+                    {
+                        const double t = ts[i], u = 1 - t;
+                        add(u * u * u * cx + 3 * u * u * t * x1 + 3 * u * t * t * x2 + t * t * t * x3,
+                            u * u * u * cy + 3 * u * u * t * y1 + 3 * u * t * t * y2 + t * t * t * y3);
+                    }
+                }
+                cx = x3;
+                cy = y3;
+                k += 6;
+                break;
+            }
+            case vector_path::close:
+                break;
+            }
+        }
+        if(!std::isfinite(minX))
+        {
+            return false;
+        }
+        box[0] = float(minX);
+        box[1] = float(minY);
+        box[2] = float(maxX - minX);
+        box[3] = float(maxY - minY);
+        return true;
+    }
+
+    // Telegram (VENDOR.md edit 72): the transform the painter applies to an SVG element in its parent's user space.
+    transform_matrix svg_element_transform(const element::ptr& el)
+    {
+        for(element::ptr p = el ? el->parent() : nullptr; p; p = p->parent())
+        {
+            if(const auto* svg = dynamic_cast<const el_svg*>(p.get()))
+            {
+                // The view the painter draws the svg's children in: its viewBox, else its width and height (as
+                // svg_geometry reads them).
+                float view[4] = {0, 0, 0, 0};
+                if(!svg->view_box(view))
+                {
+                    std::vector<float> w = numbers(svg->get_attr("width"));
+                    std::vector<float> h = numbers(svg->get_attr("height"));
+                    view[2]              = w.empty() ? 0 : w[0];
+                    view[3]              = h.empty() ? 0 : h[0];
+                }
+                const auto     tag      = std::dynamic_pointer_cast<html_tag>(el);
+                const position view_box = position(pixel_t(view[0]), pixel_t(view[1]), pixel_t(view[2]), pixel_t(view[3]));
+                return tag && tag->has_own_property(_transform_) ? svg_css_transform(el, view_box)
+                                                                 : parse_svg_transform(el->get_attr("transform"));
+            }
+        }
+        return transform_matrix();
+    }
+
+    // Telegram (VENDOR.md edit 30.2): an SVG property as the painter resolves it, for getComputedStyle.
+    css_token_vector svg_computed_property(const element::ptr& el, string_id name)
+    {
+        return svg_property(el, name, true);
+    }
+
     float svg_path_length(const vector_path& path, float at, float* outx, float* outy)
     {
         float  total = 0, cx = 0, cy = 0, sx = 0, sy = 0;
@@ -1601,6 +1759,30 @@ namespace litehtml
         if(doc)
             doc->note_svg();
         m_css.set_display(display_inline_block);
+    }
+
+    // Telegram (VENDOR.md edit 38): the document's instance budget is shared by every <svg>. This svg may draw what its
+    // last paint drew plus whatever no other svg's last paint used; a removed svg gives its share back when it goes.
+    el_svg::~el_svg()
+    {
+        if(auto doc = get_document())
+            doc->use_instanced() -= m_use_instanced;
+    }
+
+    int el_svg::use_budget() const
+    {
+        const document* doc    = doc_ptr();
+        const int       others = doc ? doc->use_instanced() - m_use_instanced : 0;
+        return std::max(0, svg_painter::max_use_elements() - others);
+    }
+
+    void el_svg::note_use_drawn(int budget, int left)
+    {
+        const document* doc   = doc_ptr();
+        const int       spent = budget - std::max(0, left);
+        if(doc)
+            doc->use_instanced() += spent - m_use_instanced;
+        m_use_instanced = spent;
     }
 
     bool el_svg::is_replaced() const
@@ -1703,6 +1885,7 @@ namespace litehtml
         float       view[4];
         view_group(pos, view, group);
         svg_painter painter(doc_ptr()->container(), view, group.matrix, x.value(), y.value());
+        painter.set_use_budget(use_budget()); // Telegram (VENDOR.md edit 38)
         painter.draw_children(shared_from_this());
         return painter.hit();
     }
@@ -1716,7 +1899,12 @@ namespace litehtml
         view_group(pos, view, group);
         auto container = doc_ptr()->container();
         container->begin_group(hdc, group);
-        svg_painter(container, hdc, view).draw_children(shared_from_this());
+        // Telegram (VENDOR.md edit 38).
+        svg_painter painter(container, hdc, view);
+        const int   budget = use_budget();
+        painter.set_use_budget(budget);
+        painter.draw_children(shared_from_this());
+        note_use_drawn(budget, painter.use_budget_left());
         container->end_group(hdc);
         return true;
     }
@@ -1747,9 +1935,14 @@ namespace litehtml
         container->set_clip(pos, no_radius);
         const position cache_bounds(pixel_t((pos.x.value() - group.matrix.tx) / sx), pixel_t((pos.y.value() - group.matrix.ty) / sy),
                                     pixel_t(pos.width.value() / sx), pixel_t(pos.height.value() / sy));
-        auto paint = [&](uint_ptr target) {
+        // Telegram (VENDOR.md edit 38): the paint draws within this svg's share of the document's instance budget.
+        const int budget = use_budget();
+        auto      paint  = [&](uint_ptr target) {
             container->begin_group(target, group);
-            svg_painter(container, target, view, m_group_cache_eligible ? &cache_bounds : nullptr).draw_children(shared_from_this());
+            svg_painter painter(container, target, view, m_group_cache_eligible ? &cache_bounds : nullptr);
+            painter.set_use_budget(budget);
+            painter.draw_children(shared_from_this());
+            note_use_drawn(budget, painter.use_budget_left());
             container->end_group(target);
         };
         uint64_t key    = 0;
