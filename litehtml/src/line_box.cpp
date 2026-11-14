@@ -7,6 +7,7 @@
 #include "types.h"
 #include <algorithm>
 #include <cmath>
+#include <numeric>
 
 //////////////////////////////////////////////////////////////////////////////////////////
 
@@ -1010,6 +1011,132 @@ std::list<std::unique_ptr<litehtml::line_box_item>> litehtml::line_box::new_widt
     return ret_items;
 }
 
+// UAX #9 through the host: one unit per content item (a word or an atomic inline), with the inline start and
+// continuation edges before it and the end edges after it, so an inline's edges travel with its first and last
+// content. The units are laid again in visual order (rule L2) inside the extent the line was laid out in; a right to
+// left paragraph is mirrored across the line first, as in the fallback. False leaves the line untouched.
+bool litehtml::line_box::reorder_with_host_levels()
+{
+    struct unit
+    {
+        std::vector<line_box_item*> items;
+        std::string                 text;
+        pixel_t                     x   = 0_px;
+        pixel_t                     end = 0_px;
+    };
+    std::vector<unit>           units;
+    std::vector<line_box_item*> pending;
+    for(const auto& item : m_items)
+    {
+        line_box_item* lbi = item.get();
+        switch(lbi->get_type())
+        {
+        case line_box_item::type_inline_start:
+        case line_box_item::type_inline_continue:
+            pending.push_back(lbi);
+            break;
+        case line_box_item::type_inline_end:
+            if(pending.empty() && !units.empty())
+                units.back().items.push_back(lbi);
+            else
+                pending.push_back(lbi);
+            break;
+        default:
+        {
+            unit u;
+            u.items = std::move(pending);
+            pending.clear();
+            u.items.push_back(lbi);
+            const auto& el = lbi->get_el()->src_el();
+            if(el->is_text())
+                el->get_text(u.text);
+            if(u.text.empty())
+                u.text = "\xEF\xBF\xBC";
+            units.push_back(std::move(u));
+            break;
+        }
+        }
+    }
+    if(!pending.empty())
+    {
+        if(units.empty())
+            return false;
+        units.back().items.insert(units.back().items.end(), pending.begin(), pending.end());
+    }
+    if(units.size() < 2 || m_items.empty())
+        return false;
+    const auto doc = m_items.front()->get_el()->src_el()->get_document();
+    if(!doc || !doc->container())
+        return false;
+    std::vector<std::string> texts;
+    texts.reserve(units.size());
+    for(const auto& u : units)
+        texts.push_back(u.text);
+    std::vector<uint8_t> levels;
+    if(!doc->container()->bidi_levels(texts, m_rtl, levels) || levels.size() != units.size())
+        return false;
+    // The host answered: the line is its to order, even when nothing needs reversing.
+    const uint8_t highest    = *std::max_element(levels.begin(), levels.end());
+    uint8_t       lowest_odd = 255;
+    for(uint8_t level : levels)
+    {
+        if(level % 2 == 1)
+            lowest_odd = std::min(lowest_odd, level);
+    }
+    if(lowest_odd == 255)
+        return true;
+    std::vector<size_t> order(units.size());
+    std::iota(order.begin(), order.end(), size_t(0));
+    for(int level = highest; level >= lowest_odd; level--)
+    {
+        for(size_t i = 0; i < order.size();)
+        {
+            if(levels[order[i]] < level)
+            {
+                i++;
+                continue;
+            }
+            size_t j = i;
+            while(j < order.size() && levels[order[j]] >= level)
+                j++;
+            std::reverse(order.begin() + i, order.begin() + j);
+            i = j;
+        }
+    }
+    // Each unit's slot runs from its start to the next unit's start (the last one's to its right edge), so the
+    // alignment shift and the justification spacing stay as they were laid out; the slots follow in visual order.
+    for(size_t i = 0; i < units.size(); i++)
+        units[i].x = units[i].items.front()->left();
+    pixel_t block_end = units.front().x;
+    for(size_t i = 0; i < units.size(); i++)
+    {
+        if(i + 1 < units.size())
+        {
+            units[i].end = units[i + 1].x;
+        } else
+        {
+            units[i].end = units[i].x;
+            for(auto* it : units[i].items)
+                units[i].end = std::max(units[i].end, it->right());
+        }
+        block_end = std::max(block_end, units[i].end);
+    }
+    // A right to left line was laid out as if it were left to right and is mirrored: its block ends where the
+    // mirror puts it (m_left + m_right - block_end), then reads in the visual order.
+    pixel_t cursor = m_rtl ? m_left + m_right - block_end : units.front().x;
+    for(size_t k : order)
+    {
+        const pixel_t dx = cursor - units[k].x;
+        if(dx != 0_px)
+        {
+            for(auto* it : units[k].items)
+                it->pos().x += dx;
+        }
+        cursor += units[k].end - units[k].x;
+    }
+    return true;
+}
+
 void litehtml::line_box::reorder_bidi()
 {
     // Each word is an item, and the shaper lays out the characters inside one: what is left is the order of
@@ -1022,6 +1149,10 @@ void litehtml::line_box::reorder_bidi()
     };
     // Most lines are left to right through and through: they are left as they are, without allocating.
     if(!m_rtl && std::none_of(m_items.begin(), m_items.end(), [&](const auto& lbi) { return direction_of(*lbi) > 0; }))
+        return;
+    // The host's levels (UAX #9, document_container::bidi_levels) win when it answers; this function's simplified
+    // reordering is the fallback for a host that does not (the default) and for lines the host's answer does not fit.
+    if(reorder_with_host_levels())
         return;
     std::vector<line_box_item*> items;
     std::vector<int8_t>         dirs;

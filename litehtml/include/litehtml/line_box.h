@@ -264,6 +264,7 @@ namespace litehtml
       private:
         /// Visual order: a right to left line mirrored, and runs of the other direction turned back.
         void           reorder_bidi();
+        bool           reorder_with_host_levels();
         bool           have_last_space() const;
         bool           is_break_only() const;
         static pixel_t calc_va_baseline(const va_context& current, vertical_align va, const font_metrics& new_font,
