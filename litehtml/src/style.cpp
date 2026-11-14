@@ -384,6 +384,16 @@ namespace litehtml
         }
     }
 
+    void style::add_length_property(string_id name, const css_token& val, const css_values& keywords, int options,
+                                    bool important)
+    {
+        css_length length;
+        if(length.from_token(val, options, keywords))
+        {
+            add_parsed_property(name, property_value(length, important));
+        }
+    }
+
     static const char* const raw_declaration_names[] = {
         "animation", "animation-name", "animation-duration", "animation-timing-function", "animation-delay",
         "animation-iteration-count", "animation-direction", "animation-fill-mode", "animation-play-state",
