@@ -248,6 +248,16 @@ namespace litehtml
         m_renders.push_back(ri);
     }
 
+    // Telegram (VENDOR.md edit 74): a replaced item leaves its element while it is still alive, so get_render_item, which
+    // answers the first entry, never answers it (nor, once it is gone, null).
+    void element::remove_render(const render_item* ri)
+    {
+        m_renders.remove_if([ri](const std::weak_ptr<render_item>& item) {
+            auto locked = item.lock();
+            return !locked || locked.get() == ri;
+        });
+    }
+
     bool element::find_styles_changes(const std::function<void(const position&)>& redraw_box)
     {
         if(css().get_display() == display_inline_text)
@@ -292,6 +302,11 @@ namespace litehtml
     element::ptr element::_add_before_after(int type, const style& /*style*/)
     {
         element::ptr el;
+        // Telegram (VENDOR.md edit 19): pseudo-elements count against the element cap.
+        if(const auto doc = get_document(); doc && !doc->pseudo_element_allowed())
+        {
+            return nullptr;
+        }
         if(type == 0)
         {
             el = std::make_shared<el_before>(get_document());
@@ -350,7 +365,7 @@ namespace litehtml
             string_vector values;
 
             element::ptr current = shared_from_this();
-            while(current != nullptr)
+            while(current != nullptr && counter_lookup_step()) // Telegram (VENDOR.md edit 78)
             {
                 auto map_iterator = current->m_counter_values.find(counter_name_id);
                 if(map_iterator != current->m_counter_values.end())
@@ -375,6 +390,7 @@ namespace litehtml
 
     bool litehtml::element::find_counter(string_id counter_name_id, std::map<string_id, int>::iterator& map_iterator)
     {
+#if 0
         element::ptr current = shared_from_this();
 
         while(current != nullptr)
@@ -400,6 +416,38 @@ namespace litehtml
         }
 
         return false;
+#else
+        // Telegram (VENDOR.md edit 78): the same search, the nearest holder first at each level, reading the siblings in
+        // place, every element visited a selector step of the pass.
+        for(element::ptr current = shared_from_this(); current; current = current->parent())
+        {
+            if(!counter_lookup_step())
+                return false;
+            map_iterator = current->m_counter_values.find(counter_name_id);
+            if(map_iterator != current->m_counter_values.end())
+                return true;
+            const element::ptr parent = current->parent();
+            if(!parent)
+                continue;
+            // The last holder before `current` is the nearest one.
+            element* holder = nullptr;
+            for(const element::ptr& sibling : parent->children())
+            {
+                if(sibling == current)
+                    break;
+                if(!counter_lookup_step())
+                    return false;
+                if(sibling->m_counter_values.count(counter_name_id))
+                    holder = sibling.get();
+            }
+            if(holder)
+            {
+                map_iterator = holder->m_counter_values.find(counter_name_id);
+                return true;
+            }
+        }
+        return false;
+#endif
     }
 
     std::vector<element::ptr> litehtml::element::get_siblings_before() const
@@ -545,6 +593,8 @@ namespace litehtml
     }
 
     bool element::appendChild(const ptr& /*el*/) LITEHTML_RETURN_FUNC(false);
+    bool element::accepts_child(string_id /*tag*/) const LITEHTML_RETURN_FUNC(false); // Telegram (VENDOR.md edit 83)
+    bool element::accepts_text() const LITEHTML_RETURN_FUNC(false);
     bool element::removeChild(const ptr& /*el*/) LITEHTML_RETURN_FUNC(false);
     void element::clearRecursive() LITEHTML_EMPTY_FUNC;
     string_id   element::id() const LITEHTML_RETURN_FUNC(empty_id);

@@ -49,6 +49,18 @@ namespace litehtml
         return map[str] = static_cast<string_id>(array.size() - 1);
     }
 
+    bool _find_id(const std::string& str, string_id& id)
+    {
+        lock_guard;
+        auto it = map.find(str);
+        if(it == map.end())
+        {
+            return false;
+        }
+        id = it->second;
+        return true;
+    }
+
     const std::string& _s(string_id id)
     {
         lock_guard;

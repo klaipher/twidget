@@ -99,6 +99,8 @@ namespace litehtml
         _grid_column_start_, _grid_column_end_, _grid_row_start_, _grid_row_end_,
         _justify_items_, _justify_self_, _place_items_, _place_self_, _place_content_,
         _letter_spacing_, _word_spacing_, _opacity_, _clip_path_, _box_shadow_, _transform_, _translate_, _rotate_, _scale_, _transform_origin_, _transform_box_, _backface_visibility_, _contain_,
+        // Telegram (VENDOR.md edit 32.4): quotes
+        _quotes_,
         _accent_color_, _color_scheme_, _outline_, _outline_width_, _outline_style_, _outline_color_, _outline_offset_, _inset_,
         _fill_, _fill_opacity_, _fill_rule_, _stroke_, _stroke_width_, _stroke_opacity_, _stroke_linecap_,
         _stroke_linejoin_, _stroke_miterlimit_, _stroke_dasharray_, _stroke_dashoffset_, _text_anchor_, _text_shadow_,
@@ -114,6 +116,10 @@ namespace litehtml
 
         // at-rules and their components
         _charset_, _layer_, _supports_, _import_, _media_, _and_, _or_, _boolean_, _plain_, _range_, _discrete_,
+        // Telegram (VENDOR.md edit 13): prefers-color-scheme and its values
+        _prefers_color_scheme_,
+        // Telegram (VENDOR.md edit 29.5): prefers-reduced-motion and its values
+        _prefers_reduced_motion_, _no_preference_, _reduce_,
         _integer_, _length_, _resolution_, _ratio_, _keyword_, _orientation_, _portrait_, _landscape_, _device_width_,
         _device_height_, _aspect_ratio_, _device_aspect_ratio_, _color_index_, _monochrome_, _light_, _dark_, )
 #undef STRING_ID
@@ -121,6 +127,10 @@ namespace litehtml
     extern const string_id star_id;  // _id("*")
 
     string_id          _id(const std::string& str);
+    // Telegram (VENDOR.md edit 23): the id of `str` when the table already holds it, without adding it. _id adds every
+    // name it is asked for to a process-wide table that never shrinks, so a lookup of a name a widget chose (a custom
+    // property in getComputedStyle) must not go through it.
+    bool               _find_id(const std::string& str, string_id& id);
     const std::string& _s(string_id id);
 
 } // namespace litehtml

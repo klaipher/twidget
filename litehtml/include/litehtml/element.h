@@ -11,6 +11,10 @@
 
 namespace litehtml
 {
+    // Telegram (VENDOR.md edit 78): counts an element a counter's lookup visits as a selector step of the matching pass in
+    // progress; false once the pass's budget is passed (the lookup then finds nothing, as a selector matches nothing).
+    bool counter_lookup_step();
+
     class line_box;
     class dumper;
     class render_item;
@@ -89,6 +93,10 @@ namespace litehtml
         virtual element::ptr select_one(const css_selector& selector);
 
         virtual bool appendChild(const ptr& el);
+        // Telegram (VENDOR.md edit 83): whether appendChild would link an element whose tag() is `tag`, or a text piece, so
+        // that a caller can ask before it makes (and counts) the child.
+        virtual bool accepts_child(string_id tag) const;
+        virtual bool accepts_text() const;
         virtual bool removeChild(const ptr& el);
         // Replaces the consecutive children `old` (in order) with `replacement`, keeping their position.
         bool         replace_children(const std::vector<ptr>& old, const elements_list& replacement);
@@ -158,6 +166,7 @@ namespace litehtml
 
         bool requires_styles_update();
         void add_render(const std::shared_ptr<render_item>& ri);
+        void remove_render(const render_item* ri); // Telegram (VENDOR.md edit 74)
         void mark_layout_dirty();
         bool find_styles_changes(const std::function<void(const position&)>& redraw_box);
 
@@ -179,6 +188,8 @@ namespace litehtml
 
       private:
         std::vector<element::ptr> get_siblings_before() const;
+        // Telegram (VENDOR.md edit 78): find_counter visits the siblings in place, each element a selector step of the
+        // pass (counter_lookup_step).
         bool find_counter(string_id counter_name_id, std::map<string_id, int>::iterator& map_iterator);
         void parse_counter_tokens(const std::vector<std::string>& tokens, int default_value,
                                   const std::function<void(string_id, int)>& handler) const;
