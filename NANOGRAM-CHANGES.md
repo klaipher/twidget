@@ -52,23 +52,26 @@ Ours: branch `nanogram`, used by Nanogram for iOS, macOS and Android. History: [
     recovery, SVG aspect); `CreateFeatureFont` takes a `CTFontRef`, so iOS gets font features too; the box-shadow
     downsampling (65) uses `TWClipPath`.
   - SVG: the iOS `<use>` budget (`kMaxUseElements` 8,192 shared per document) is added to this branch's `draw_use`.
-- NOT carried although the iOS app has it (owner decisions or follow-ups):
-  - Edit 47: UAX #9 bidi through the host's `document_container::bidi_levels`. This branch has its own, simplified
-    `reorder_bidi` (a word is right to left by its first strong character), which stays; the iOS virtual is declared (it
-    defaults to "no levels") so an iOS host that overrides it still compiles. Using the host's levels when it reports
-    them, with this branch's as the fallback, is a small follow-up.
-  - Edits 48, 49, 56 (calc): this branch's `css_units_calc` registry (4,096 interned expressions per process, nesting 16)
-    replaces the iOS trees (64 nodes each, shared by an atomic count). The iOS limit is per length and never fills up; the
-    registry's is a process-wide ceiling, after which later calc expressions are refused. Owner decision before the iOS
-    pin: keep, or raise the ceiling, or port the trees.
-  - The iOS `fork_test.cpp` checks for the dropped edits are not ported (they live in the iOS repo); the conformance and
-    Twidget counts must be rebaselined by the iOS integrator.
+- Edit 47 (UAX #9 bidi) IS carried: `line_box::reorder_with_host_levels` asks `document_container::bidi_levels` for the
+  embedding level of each unit (a word or an atomic inline, inline edges travelling with their content), applies rule L2 and
+  lays the units again in visual order inside the extent the line was laid out in (a right to left line is mirrored first).
+  The branch's own simplified `reorder_bidi` (a word is right to left by its first strong character) stays as the
+  fallback when the host answers false or with levels of another size, which is the default for a host that does not
+  override `bidi_levels` (macOS, Android).
+- NOT carried although the iOS app has it:
+  - Edits 48, 49, 56 (calc): this branch's `css_units_calc` registry (nesting 16) replaces the iOS trees (64 nodes each,
+    shared by an atomic count). The registry is shared by all documents of the process and holds at most 16,384 distinct
+    expressions (raised from 4,096); after that new calc() declarations are dropped, those already interned keep
+    working. The iOS trees were per length and could not fill up, so one widget that writes 16,384 distinct calc()
+    values could still turn calc() off for widgets created later until the app restarts. Per-document ownership needs
+    a reference count in `css_length` and a build to prove it; it is the follow-up if this limit is ever reached.
+  - The `calc_node::live()`, `css_length::is_calc()` and `litehtml::calc_fonts()` test hooks of the iOS `fork_test.cpp`
+    do not exist here (the calc tree is file-local), so those test blocks are dropped from the iOS repository, and the
+    conformance and Twidget counts are rebaselined there.
 - Stricter cap wins: edit 14 (component nesting 64), 15 (list caps), 10 (text pieces), 19, 21 (style bytes) and the
   gumbo limits are the iOS values, since this branch had none of them; where this branch has its own cap (the var()
-  token budget 16,384, calc 4,096, `<use>` depth 8) both apply.
-- Nothing here was built or run. `nanogram` is a usable iOS pin only after the main session's build and test run below.
-- Obsolete: the local branch `wip/ios-delta-clean` held a partial first attempt; it is superseded by this port and is
-  never to be pushed or pinned.
+  token budget 16,384, calc 16,384 expressions, `<use>` depth 8) both apply.
+- This branch was assembled without a compiler: it needs the build and test run below before it ships.
 
 ### Build and test steps still owed
 - iOS: the combined iOS build, the 10 twidget/gumbo cc_tests, TwidgetRenderingTests, FidelityRenderTests, WidgetRuntime tests.
