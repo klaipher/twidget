@@ -313,19 +313,7 @@ std::list<std::unique_ptr<litehtml::line_box_item>> litehtml::line_box::finish(
     pixel_t spacing_x = 0_px; // Number of pixels to distribute between elements
     pixel_t shift_x   = 0_px; // Shift elements by X to apply the text-align
 
-    // The line is laid out left to right and mirrored afterwards when it is right to left (reorder_bidi), so
-    // its alignment is mirrored here: start is the left until then.
-    text_align align = m_text_align;
-    if(align == text_align_start)
-        align = text_align_left;
-    else if(align == text_align_end)
-        align = text_align_right;
-    else if(m_rtl && align == text_align_left)
-        align = text_align_right;
-    else if(m_rtl && align == text_align_right)
-        align = text_align_left;
-
-    switch(align)
+    switch(m_text_align)
     {
     case text_align_right:
     case text_align_end:
@@ -345,6 +333,11 @@ std::list<std::unique_ptr<litehtml::line_box_item>> litehtml::line_box::finish(
         {
             shift_x   = 0_px;
             spacing_x = (m_right - m_left) - m_width;
+        }
+        // Telegram (VENDOR.md edit 46): a justified paragraph's last line aligns to its start.
+        else if(m_rtl && m_width < (m_right - m_left))
+        {
+            shift_x = (m_right - m_left) - m_width;
         }
         break;
     default:
@@ -419,7 +412,7 @@ std::list<std::unique_ptr<litehtml::line_box_item>> litehtml::line_box::finish(
             lbi->pos().x += pixel_t(cixx);
         }
         counter++;
-        if((align == text_align_right || spacing_x != 0_px) && counter == static_cast<int>(m_items.size()))
+        if((m_text_align == text_align_right || m_text_align == text_align_end || spacing_x != 0_px) && counter == static_cast<int>(m_items.size()))
         {
             // Forcible justify the last element to the right side for text align right and justify.
             // Its outer edge meets the side: padding, borders and margins of an inline-block or an
@@ -685,10 +678,17 @@ std::list<std::unique_ptr<litehtml::line_box_item>> litehtml::line_box::finish(
         m_baseline = line_max_height.bottom;
     }
 
+    // Telegram (VENDOR.md edit 47): visual order, before the inline boxes are taken from their items.
+    reorder_bidi();
+
     struct inline_item_box
     {
         std::shared_ptr<render_item> element;
         position                     box;
+        // Telegram (VENDOR.md edit 47): the extent of the inline's items, which bidi reordering may have moved apart
+        // from its start and end edges.
+        pixel_t                      left  = 0_px;
+        pixel_t                      right = 0_px;
 
         inline_item_box() = default;
         explicit inline_item_box(const std::shared_ptr<render_item>& el) :
@@ -698,8 +698,6 @@ std::list<std::unique_ptr<litehtml::line_box_item>> litehtml::line_box::finish(
     };
 
     std::list<inline_item_box> inlines;
-
-    reorder_bidi();
 
     contexts.clear();
 
@@ -757,36 +755,48 @@ std::list<std::unique_ptr<litehtml::line_box_item>> litehtml::line_box::finish(
             lbi->pos().y += m_top + top_shift;
         }
 
+#if 0
         lbi->get_el()->apply_relative_shift(containing_block_size);
-        // What a relatively positioned inline element holds moves with it: its text and boxes are items of their own.
-        // So do its start and end, which keep a position of their own that the element's shift above does not move.
-        const bool marker = lbi->get_type() == line_box_item::type_inline_start ||
-                            lbi->get_type() == line_box_item::type_inline_continue ||
-                            lbi->get_type() == line_box_item::type_inline_end;
-        for(auto p = marker ? lbi->get_el()->src_el() : lbi->get_el()->src_el()->parent();
-            p && p->css().get_display() == display_inline; p = p->parent())
+#else
+        // Telegram (VENDOR.md edit 44): a relatively positioned inline box moves its content with it. The upstream shifted
+        // the inline's own render item once for its start item and again for its end (a text piece's placement adds it,
+        // so the paint moved twice while the inline box, which the edges make, did not move): an inline's render item
+        // keeps no offset. An item takes the offsets of its inline ancestors, an inline box's edges (its start,
+        // continuation and end) its own too, and a text piece or an atomic inline (placed again every layout) its own
+        // as before.
+        if(lbi->get_type() == line_box_item::type_text_part)
+            lbi->get_el()->apply_relative_shift(containing_block_size);
+#endif
         {
-            if(p->css().get_position() != element_position_relative)
-                continue;
-            css_offsets offsets = p->css().get_offsets();
-            if(!offsets.left.is_predefined())
-                lbi->pos().x += offsets.left.calc_percent(containing_block_size.width);
-            else if(!offsets.right.is_predefined())
-                lbi->pos().x -= offsets.right.calc_percent(containing_block_size.width);
-            if(!offsets.top.is_predefined())
-                lbi->pos().y += offsets.top.calc_percent(containing_block_size.height);
-            else if(!offsets.bottom.is_predefined())
-                lbi->pos().y -= offsets.bottom.calc_percent(containing_block_size.height);
+            pixel_t   dx = 0, dy = 0;
+            const bool edge = lbi->get_type() != line_box_item::type_text_part;
+            auto add = [&](const render_item& ri) {
+                if(ri.src_el()->css().get_position() != element_position_relative)
+                    return;
+                const css_offsets& offsets = ri.src_el()->css().get_offsets();
+                if(!offsets.left.is_predefined())
+                    dx += offsets.left.calc_percent(containing_block_size.width);
+                else if(!offsets.right.is_predefined())
+                    dx -= offsets.right.calc_percent(containing_block_size.width);
+                if(!offsets.top.is_predefined())
+                    dy += offsets.top.calc_percent(containing_block_size.height);
+                else if(!offsets.bottom.is_predefined())
+                    dy -= offsets.bottom.calc_percent(containing_block_size.height);
+            };
+            if(edge)
+                add(*lbi->get_el());
+            for(auto parent = lbi->get_el()->parent(); parent && parent->src_el()->css().get_display() == display_inline;
+                parent = parent->parent())
+                add(*parent);
+            if(dx != 0_px || dy != 0_px)
+            {
+                lbi->pos().x += dx;
+                lbi->pos().y += dy;
+            }
         }
 
-        // Calculate and push inline box into the render item element. An inline box spans whatever its items
-        // take, in whichever order a reordered line (reorder_bidi) shows them.
-        for(auto& open : inlines)
-        {
-            const pixel_t right = std::max(open.box.right(), lbi->right());
-            open.box.x          = std::min(open.box.x, lbi->left());
-            open.box.width      = right - open.box.x;
-        }
+        // Calculate and push inline box into the render item element
+#if 0
         if(lbi->get_type() == line_box_item::type_inline_start ||
            lbi->get_type() == line_box_item::type_inline_continue)
         {
@@ -796,24 +806,214 @@ std::list<std::unique_ptr<litehtml::line_box_item>> litehtml::line_box::finish(
             }
             inlines.emplace_back(lbi->get_el());
             inlines.back().box.x      = lbi->left();
-            inlines.back().box.width  = lbi->right() - lbi->left();
             inlines.back().box.y      = lbi->top() - lbi->get_el()->content_offset_top();
             inlines.back().box.height = lbi->bottom() - lbi->top() + lbi->get_el()->content_offset_height();
-        } else if(lbi->get_type() == line_box_item::type_inline_end && !inlines.empty())
+        } else if(lbi->get_type() == line_box_item::type_inline_end)
         {
-            inlines.back().element->add_inline_box(inlines.back().box);
-            inlines.pop_back();
+            if(!inlines.empty())
+            {
+                inlines.back().box.width = lbi->right() - inlines.back().box.x;
+                inlines.back().element->add_inline_box(inlines.back().box);
+                inlines.pop_back();
+            }
         }
     }
 
     for(auto iter = inlines.rbegin(); iter != inlines.rend(); ++iter)
     {
+        iter->box.width = m_items.back()->right() - iter->box.x;
         iter->element->add_inline_box(iter->box);
+#else
+        // Telegram (VENDOR.md edit 47): an open inline's box covers every item met while it is open, its edges
+        // included; in logical order its start edge is the leftmost and its end the rightmost, as upstream took them.
+        for(auto& open : inlines)
+        {
+            open.left  = std::min(open.left, lbi->left());
+            open.right = std::max(open.right, lbi->right());
+        }
+        if(lbi->get_type() == line_box_item::type_inline_start ||
+           lbi->get_type() == line_box_item::type_inline_continue)
+        {
+            if(lbi->get_type() == line_box_item::type_inline_start)
+            {
+                lbi->get_el()->clear_inline_boxes();
+            }
+            inlines.emplace_back(lbi->get_el());
+            inlines.back().left       = lbi->left();
+            inlines.back().right      = lbi->right();
+            inlines.back().box.y      = lbi->top() - lbi->get_el()->content_offset_top();
+            inlines.back().box.height = lbi->bottom() - lbi->top() + lbi->get_el()->content_offset_height();
+        } else if(lbi->get_type() == line_box_item::type_inline_end)
+        {
+            if(!inlines.empty())
+            {
+                inlines.back().box.x     = inlines.back().left;
+                inlines.back().box.width = inlines.back().right - inlines.back().left;
+                inlines.back().element->add_inline_box(inlines.back().box);
+                inlines.pop_back();
+            }
+        }
+    }
+
+    for(auto iter = inlines.rbegin(); iter != inlines.rend(); ++iter)
+    {
+        iter->box.x     = iter->left;
+        iter->box.width = iter->right - iter->left;
+        iter->element->add_inline_box(iter->box);
+#endif
 
         ret_items.emplace_front(std::unique_ptr<line_box_item>(new lbi_continue(iter->element)));
     }
 
     return ret_items;
+}
+
+// Telegram (VENDOR.md edit 47).
+namespace
+{
+    // Whether `text` (UTF-8) holds a right-to-left character or control, so that a left-to-right line may need
+    // reordering: the Hebrew to Arabic Extended blocks, the Hebrew and Arabic presentation forms, the right-to-left
+    // historic scripts and the RLM, RLE, RLO and RLI controls.
+    bool has_right_to_left(const std::string& text)
+    {
+        for(size_t i = 0; i < text.size();)
+        {
+            const unsigned char lead = static_cast<unsigned char>(text[i]);
+            const size_t        size = lead < 0x80 ? 1 : lead >= 0xF0 ? 4 : lead >= 0xE0 ? 3 : lead >= 0xC0 ? 2 : 1;
+            if(i + size > text.size())
+                break;
+            uint32_t c = size == 1 ? lead : size == 2 ? lead & 0x1F : size == 3 ? lead & 0x0F : lead & 0x07;
+            for(size_t k = 1; k < size; k++)
+                c = (c << 6) | (static_cast<unsigned char>(text[i + k]) & 0x3F);
+            if((c >= 0x0590 && c <= 0x08FF) || (c >= 0xFB1D && c <= 0xFDFF) || (c >= 0xFE70 && c <= 0xFEFF) ||
+               (c >= 0x10800 && c <= 0x10FFF) || (c >= 0x1E800 && c <= 0x1EFFF) || c == 0x200F || c == 0x202B ||
+               c == 0x202E || c == 0x2067)
+                return true;
+            i += size;
+        }
+        return false;
+    }
+}
+
+void litehtml::line_box::reorder_bidi()
+{
+    // A unit is one content item (a text piece or an atomic inline) with the inline start and continuation edges before
+    // it and the end edges after it, so an inline's edges travel with its first and last content.
+    struct unit
+    {
+        std::vector<line_box_item*> items;
+        std::string                 text;
+        pixel_t                     x   = 0_px;
+        pixel_t                     end = 0_px;
+    };
+    std::vector<unit>           units;
+    std::vector<line_box_item*> pending;
+    bool                        needed = m_rtl;
+    for(const auto& item : m_items)
+    {
+        line_box_item* lbi = item.get();
+        switch(lbi->get_type())
+        {
+        case line_box_item::type_inline_start:
+        case line_box_item::type_inline_continue:
+            pending.push_back(lbi);
+            break;
+        case line_box_item::type_inline_end:
+            if(pending.empty() && !units.empty())
+                units.back().items.push_back(lbi);
+            else
+                pending.push_back(lbi);
+            break;
+        default:
+        {
+            unit u;
+            u.items = std::move(pending);
+            pending.clear();
+            u.items.push_back(lbi);
+            const auto& el = lbi->get_el()->src_el();
+            if(el->is_text())
+                el->get_text(u.text);
+            if(u.text.empty())
+                u.text = "\xEF\xBF\xBC";
+            needed = needed || has_right_to_left(u.text);
+            units.push_back(std::move(u));
+            break;
+        }
+        }
+    }
+    if(!pending.empty())
+    {
+        if(units.empty())
+            return;
+        units.back().items.insert(units.back().items.end(), pending.begin(), pending.end());
+    }
+    if(!needed || units.size() < 2 || m_items.empty())
+        return;
+    const auto doc = m_items.front()->get_el()->src_el()->get_document();
+    std::vector<std::string> texts;
+    texts.reserve(units.size());
+    for(const auto& u : units)
+        texts.push_back(u.text);
+    std::vector<uint8_t> levels;
+    if(!doc || !doc->container()->bidi_levels(texts, m_rtl, levels) || levels.size() != units.size())
+    {
+        // Fork fallback: a host without bidi_levels still gets right to left words in the right order.
+        reorder_bidi_fallback();
+        return;
+    }
+    // L2: from the highest level to the lowest odd one, reverse every run of units at that level or higher.
+    const uint8_t highest = *std::max_element(levels.begin(), levels.end());
+    uint8_t       lowest_odd = 255;
+    for(uint8_t level : levels)
+        if(level % 2 == 1)
+            lowest_odd = std::min(lowest_odd, level);
+    if(lowest_odd == 255)
+        return;
+    std::vector<size_t> order(units.size());
+    std::iota(order.begin(), order.end(), 0);
+    for(int level = highest; level >= lowest_odd; level--)
+    {
+        for(size_t i = 0; i < order.size();)
+        {
+            if(levels[order[i]] < level)
+            {
+                i++;
+                continue;
+            }
+            size_t j = i;
+            while(j < order.size() && levels[order[j]] >= level)
+                j++;
+            std::reverse(order.begin() + i, order.begin() + j);
+            i = j;
+        }
+    }
+    // Each unit's slot, its start to the next unit's start (the last one's to its right edge), keeps the alignment
+    // shift and the justification spacing as they were laid out; the slots are laid again in visual order.
+    for(size_t i = 0; i < units.size(); i++)
+        units[i].x = units[i].items.front()->left();
+    for(size_t i = 0; i < units.size(); i++)
+    {
+        if(i + 1 < units.size())
+        {
+            units[i].end = units[i + 1].x;
+        } else
+        {
+            units[i].end = units[i].x;
+            for(auto* it : units[i].items)
+                units[i].end = std::max(units[i].end, it->right());
+        }
+    }
+    pixel_t cursor = units.front().x;
+    for(size_t k : order)
+    {
+        const pixel_t dx = cursor - units[k].x;
+        if(dx != 0_px)
+        {
+            for(auto* it : units[k].items)
+                it->pos().x += dx;
+        }
+        cursor += units[k].end - units[k].x;
+    }
 }
 
 std::shared_ptr<litehtml::render_item> litehtml::line_box::get_first_text_part() const
@@ -1016,129 +1216,7 @@ std::list<std::unique_ptr<litehtml::line_box_item>> litehtml::line_box::new_widt
 // continuation edges before it and the end edges after it, so an inline's edges travel with its first and last
 // content. The units are laid again in visual order (rule L2) inside the extent the line was laid out in; a right to
 // left paragraph is mirrored across the line first, as in the fallback. False leaves the line untouched.
-bool litehtml::line_box::reorder_with_host_levels()
-{
-    struct unit
-    {
-        std::vector<line_box_item*> items;
-        std::string                 text;
-        pixel_t                     x   = 0_px;
-        pixel_t                     end = 0_px;
-    };
-    std::vector<unit>           units;
-    std::vector<line_box_item*> pending;
-    for(const auto& item : m_items)
-    {
-        line_box_item* lbi = item.get();
-        switch(lbi->get_type())
-        {
-        case line_box_item::type_inline_start:
-        case line_box_item::type_inline_continue:
-            pending.push_back(lbi);
-            break;
-        case line_box_item::type_inline_end:
-            if(pending.empty() && !units.empty())
-                units.back().items.push_back(lbi);
-            else
-                pending.push_back(lbi);
-            break;
-        default:
-        {
-            unit u;
-            u.items = std::move(pending);
-            pending.clear();
-            u.items.push_back(lbi);
-            const auto& el = lbi->get_el()->src_el();
-            if(el->is_text())
-                el->get_text(u.text);
-            if(u.text.empty())
-                u.text = "\xEF\xBF\xBC";
-            units.push_back(std::move(u));
-            break;
-        }
-        }
-    }
-    if(!pending.empty())
-    {
-        if(units.empty())
-            return false;
-        units.back().items.insert(units.back().items.end(), pending.begin(), pending.end());
-    }
-    if(units.size() < 2 || m_items.empty())
-        return false;
-    const auto doc = m_items.front()->get_el()->src_el()->get_document();
-    if(!doc || !doc->container())
-        return false;
-    std::vector<std::string> texts;
-    texts.reserve(units.size());
-    for(const auto& u : units)
-        texts.push_back(u.text);
-    std::vector<uint8_t> levels;
-    if(!doc->container()->bidi_levels(texts, m_rtl, levels) || levels.size() != units.size())
-        return false;
-    // The host answered: the line is its to order, even when nothing needs reversing.
-    const uint8_t highest    = *std::max_element(levels.begin(), levels.end());
-    uint8_t       lowest_odd = 255;
-    for(uint8_t level : levels)
-    {
-        if(level % 2 == 1)
-            lowest_odd = std::min(lowest_odd, level);
-    }
-    if(lowest_odd == 255)
-        return true;
-    std::vector<size_t> order(units.size());
-    std::iota(order.begin(), order.end(), size_t(0));
-    for(int level = highest; level >= lowest_odd; level--)
-    {
-        for(size_t i = 0; i < order.size();)
-        {
-            if(levels[order[i]] < level)
-            {
-                i++;
-                continue;
-            }
-            size_t j = i;
-            while(j < order.size() && levels[order[j]] >= level)
-                j++;
-            std::reverse(order.begin() + i, order.begin() + j);
-            i = j;
-        }
-    }
-    // Each unit's slot runs from its start to the next unit's start (the last one's to its right edge), so the
-    // alignment shift and the justification spacing stay as they were laid out; the slots follow in visual order.
-    for(size_t i = 0; i < units.size(); i++)
-        units[i].x = units[i].items.front()->left();
-    pixel_t block_end = units.front().x;
-    for(size_t i = 0; i < units.size(); i++)
-    {
-        if(i + 1 < units.size())
-        {
-            units[i].end = units[i + 1].x;
-        } else
-        {
-            units[i].end = units[i].x;
-            for(auto* it : units[i].items)
-                units[i].end = std::max(units[i].end, it->right());
-        }
-        block_end = std::max(block_end, units[i].end);
-    }
-    // A right to left line was laid out as if it were left to right and is mirrored: its block ends where the
-    // mirror puts it (m_left + m_right - block_end), then reads in the visual order.
-    pixel_t cursor = m_rtl ? m_left + m_right - block_end : units.front().x;
-    for(size_t k : order)
-    {
-        const pixel_t dx = cursor - units[k].x;
-        if(dx != 0_px)
-        {
-            for(auto* it : units[k].items)
-                it->pos().x += dx;
-        }
-        cursor += units[k].end - units[k].x;
-    }
-    return true;
-}
-
-void litehtml::line_box::reorder_bidi()
+void litehtml::line_box::reorder_bidi_fallback()
 {
     // Each word is an item, and the shaper lays out the characters inside one: what is left is the order of
     // the items. A simplified bidi: a word is right to left or left to right by its first strong character,
@@ -1151,10 +1229,8 @@ void litehtml::line_box::reorder_bidi()
     // Most lines are left to right through and through: they are left as they are, without allocating.
     if(!m_rtl && std::none_of(m_items.begin(), m_items.end(), [&](const auto& lbi) { return direction_of(*lbi) > 0; }))
         return;
-    // The host's levels (UAX #9, document_container::bidi_levels) win when it answers; this function's simplified
-    // reordering is the fallback for a host that does not (the default) and for lines the host's answer does not fit.
-    if(reorder_with_host_levels())
-        return;
+    // reorder_bidi() (host levels) is tried first; this simplified reordering is the fallback for a host that does not
+    // answer.
     std::vector<line_box_item*> items;
     std::vector<int8_t>         dirs;
     items.reserve(m_items.size());
@@ -1167,10 +1243,17 @@ void litehtml::line_box::reorder_bidi()
     auto mirror = [](line_box_item* item, pixel_t from, pixel_t to) {
         item->pos().x += from + to - item->right() - item->left();
     };
-    if(m_rtl)
+    if(m_rtl && !items.empty())
     {
-        for(auto* item : items)
-            mirror(item, m_left, m_right);
+        // The line is already right-aligned: mirror across the items' own extent.
+        pixel_t from = items.front()->left(), to = items.front()->right();
+        for(auto* it : items)
+        {
+            from = std::min(from, it->left());
+            to   = std::max(to, it->right());
+        }
+        for(auto* it : items)
+            mirror(it, from, to);
     }
     // Runs of the other direction read the other way: neutrals inside a run go with it, at its ends with the line.
     const int other = m_rtl ? -1 : 1;

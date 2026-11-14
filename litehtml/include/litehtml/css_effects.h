@@ -42,6 +42,15 @@ namespace litehtml
     };
     using transform_vector = std::vector<transform_function>;
 
+    // Telegram (VENDOR.md edit 72): transform-box, read for SVG elements. fill-box, and content-box, stroke-box and
+    // border-box (which an element without a CSS box maps to its fill and stroke boxes; the stroke is not added) are a
+    // shape's geometry box; view-box, the initial value, is the viewport's.
+    enum transform_box
+    {
+        transform_box_view_box,
+        transform_box_fill_box,
+    };
+
     struct transform_matrix
     {
         float a  = 1;
@@ -117,8 +126,6 @@ namespace litehtml
         bool             backface_hidden = false;
         position         bounds;
         bool             exact_bounds = false;
-        /// The element whose group this is; null for an SVG painter's own groups.
-        const element*   owner = nullptr;
     };
 
     struct svg_gradient
@@ -152,7 +159,6 @@ namespace litehtml
         std::vector<float> dashes;
         float              dash_offset = 0;
         svg_gradient       fill_gradient;
-        svg_gradient       stroke_gradient;
     };
 
     struct clip_path_shape
@@ -204,6 +210,9 @@ namespace litehtml
     bool parse_box_shadow(const css_token_vector& tokens, box_shadow_vector& shadows, document_container* container);
     bool parse_transform(const css_token_vector& tokens, transform_vector& functions);
     bool fast_transform_tokens(const std::string& value, css_token_vector& tokens);
+    // Telegram (VENDOR.md edit 34): the value of the translate, rotate or scale property (`name`) as one transform
+    // function, 2D only; false for none and for anything else.
+    bool parse_individual_transform(string_id name, const css_token_vector& tokens, transform_function& fn);
     bool parse_filter(const css_token_vector& tokens, filter_vector& functions, document_container* container);
     bool parse_transform_origin(const css_token_vector& tokens, css_length& x, css_length& y);
     bool parse_grid_track_list(const css_token_vector& tokens, grid_track_list& list);

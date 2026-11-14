@@ -53,8 +53,6 @@ namespace litehtml
 
     bool media_feature::check(const media_features& feat) const
     {
-        if(name == "prefers-color-scheme")
-            return compare(feat.dark_color_scheme || feat.color_scheme ? _dark_ : _light_); // Telegram (VENDOR.md edit 13): either field
         switch(_id(name))
         {
         case _width_:
@@ -87,6 +85,9 @@ namespace litehtml
             return compare(feat.monochrome);
         case _resolution_:
             return compare(feat.resolution.value());
+        // Telegram (VENDOR.md edit 13): the colour scheme the container reports.
+        case _prefers_color_scheme_:
+            return compare(feat.dark_color_scheme || feat.color_scheme ? _dark_ : _light_); // either field: the fork's hosts set dark_color_scheme
         // Telegram (VENDOR.md edit 29.5): the reduced-motion preference the container reports; in a boolean context,
         // `(prefers-reduced-motion)`, only reduce matches.
         case _prefers_reduced_motion_:
@@ -477,7 +478,6 @@ namespace litehtml
     };
 
     std::map<std::string, mf_info> supported_media_features = {
-        {"prefers-color-scheme", {_discrete_, _keyword_, {_light_, _dark_}}},
         ////////////////////////////////////////////////
         // 4. Viewport/Page Dimensions Media Features
         ////////////////////////////////////////////////
@@ -493,6 +493,9 @@ namespace litehtml
 
         // https://drafts.csswg.org/mediaqueries/#orientation
         {"orientation",         {_discrete_, _keyword_, {_portrait_, _landscape_}}},
+
+        // Telegram (VENDOR.md edit 13): https://drafts.csswg.org/mediaqueries-5/#prefers-color-scheme
+        {"prefers-color-scheme", {_discrete_, _keyword_, {_light_, _dark_}}       },
 
         // Telegram (VENDOR.md edit 29.5): https://drafts.csswg.org/mediaqueries-5/#prefers-reduced-motion
         {"prefers-reduced-motion", {_discrete_, _keyword_, {_no_preference_, _reduce_}}},

@@ -14,6 +14,7 @@
 #define offset(member) offsetof(litehtml::css_properties, member)
 // #define offset(func)	[](const css_properties& css) { return css.func; }
 
+// Nanogram fork: font-variant-numeric and font-feature-settings (both feature lists) merged, the settings winning.
 static std::string merge_font_features(const std::string& variant, const std::string& settings)
 {
     if(settings.empty() || variant.empty())
@@ -84,7 +85,7 @@ static std::shared_ptr<const std::string> computed_list_style_image(const liteht
         const std::string& url = value.get<std::string>();
         return url.empty() ? nullptr : std::make_shared<const std::string>(url);
     }
-    if(value.is<litehtml::css_wide_keyword>() && value.get<litehtml::css_wide_keyword>().kind == litehtml::css_wide_keyword::initial)
+    if(value.is<litehtml::initial>())
         return nullptr;
     const auto parent = el->parent();
     if(!parent)
@@ -131,7 +132,8 @@ void litehtml::css_properties::compute(const html_tag* el, const document::ptr& 
     m_overflow   = m_overflow_y != overflow_visible ? m_overflow_y : m_overflow_x;
     m_text_align =
         static_cast<text_align>(el->get_property<int>(_text_align_, true, text_align_start, offset(m_text_align)));
-    m_direction = static_cast<direction>(el->get_property<int>(_direction_, true, direction_ltr, offset(m_direction)));
+    // Telegram (VENDOR.md edit 46): direction (inherited); the fork's dir=auto reads the first strong character below.
+    m_direction = el->get_property<int>(_direction_, true, direction_ltr, offset(m_direction));
     if(const char* dir = el->get_attr("dir"); dir && equal_i(dir, "auto"))
     {
         // dir=auto: the first strong character of the element's text decides.
@@ -161,7 +163,8 @@ void litehtml::css_properties::compute(const html_tag* el, const document::ptr& 
     m_white_space =
         static_cast<white_space>(el->get_property<int>(_white_space_, true, white_space_normal, offset(m_white_space)));
     m_overflow_wrap = static_cast<overflow_wrap>(el->get_property<int>(_overflow_wrap_, true, overflow_wrap_normal, offset(m_overflow_wrap)));
-    m_word_break = static_cast<word_break>(el->get_property<int>(_word_break_, true, word_break_normal, offset(m_word_break)));
+    // Telegram (VENDOR.md edit 32.2).
+    m_word_break = el->get_property<int>(_word_break_, true, word_break_normal, offset(m_word_break));
     m_user_select = static_cast<user_select>(el->get_property<int>(_user_select_, false, user_select_auto, offset(m_user_select)));
     m_caption_side = static_cast<caption_side>(
         el->get_property<int>(_caption_side_, true, caption_side_top, offset(m_caption_side)));
@@ -396,13 +399,19 @@ void litehtml::css_properties::compute(const html_tag* el, const document::ptr& 
         m_line_height.computed_value = m_font_metrics.height;
     } else if(m_line_height.css_value.units() == css_units_none)
     {
-        // Fractional, as browsers keep it (LayoutUnit): flooring to whole CSS px made every
-        // line of `line-height: 1.3` text up to 1 px short, an error that adds up down the page.
+#if 0 // Telegram: a line height keeps its fraction, as WebKit's does (VENDOR.md edit 9).
+        m_line_height.computed_value = pixel_t(std::floor(m_line_height.css_value.val() * font_size.value()));
+#else
         m_line_height.computed_value = pixel_t(m_line_height.css_value.val() * font_size.value());
+#endif
     } else
     {
         m_line_height.computed_value =
+#if 0 // Telegram: a line height keeps its fraction, as WebKit's does (VENDOR.md edit 9).
+            pixel_t(std::floor(doc->to_pixels(m_line_height.css_value, m_font_metrics, m_font_metrics.font_size).value()));
+#else
             doc->to_pixels(m_line_height.css_value, m_font_metrics, m_font_metrics.font_size);
+#endif
         m_line_height.css_value = static_cast<float>(m_line_height.computed_value);
     }
 
@@ -538,6 +547,14 @@ void litehtml::css_properties::compute_font(const html_tag* el, const document::
         }
     } else
     {
+        // Telegram (VENDOR.md edit 49): a calc with a percentage reads its em as the parent's size, as the
+        // non-percentage path's to_pixels does.
+        if(sz.is_calc() && sz.units() == css_units_percentage)
+        {
+            font_metrics fm;
+            fm.x_height = fm.font_size = parent_sz;
+            font_size                  = sz.calc_value(parent_sz, doc->calc_fonts_for(fm));
+        } else
         if(sz.units() == css_units_percentage)
         {
             font_size = sz.calc_percent(parent_sz);
@@ -668,26 +685,30 @@ void litehtml::css_properties::compute_font(const html_tag* el, const document::
         }
     }
 
-    auto spacing = [&](string_id name, css_length& out, uint_ptr member) {
-        css_length value = el->get_property<css_length>(name, true, css_length::predef_value(0), member);
-        if(value.is_predefined())
-        {
-            out = 0;
-        } else
-        {
-            font_metrics fm;
-            fm.x_height = fm.font_size = font_size;
-            out = static_cast<float>(doc->to_pixels(value, fm, 0_px));
-        }
-    };
-    spacing(_letter_spacing_, m_letter_spacing, offset(m_letter_spacing));
-    spacing(_word_spacing_, m_word_spacing, offset(m_word_spacing));
-    m_font_variant_numeric =
-        el->get_property<std::string>(_font_variant_numeric_, true, "", offset(m_font_variant_numeric));
-    m_font_feature_settings =
-        el->get_property<std::string>(_font_feature_settings_, true, "", offset(m_font_feature_settings));
-    bound_inherited_string(el, _font_variant_numeric_, m_font_variant_numeric, false, ""); // Telegram (VENDOR.md edit 21)
-    bound_inherited_string(el, _font_feature_settings_, m_font_feature_settings, false, "");
+    css_length letter_spacing = el->get_property<css_length>(_letter_spacing_, true, css_length::predef_value(0),
+                                                             offset(m_letter_spacing));
+    if(letter_spacing.is_predefined())
+    {
+        m_letter_spacing = 0;
+    } else
+    {
+        font_metrics fm;
+        fm.x_height = fm.font_size = font_size;
+        m_letter_spacing           = static_cast<float>(doc->to_pixels(letter_spacing, fm, 0_px));
+    }
+
+    // Telegram (VENDOR.md edit 32.3): word-spacing, as letter-spacing.
+    css_length word_spacing = el->get_property<css_length>(_word_spacing_, true, css_length::predef_value(0),
+                                                           offset(m_word_spacing));
+    if(word_spacing.is_predefined())
+    {
+        m_word_spacing = 0;
+    } else
+    {
+        font_metrics fm;
+        fm.x_height = fm.font_size = font_size;
+        m_word_spacing             = static_cast<float>(doc->to_pixels(word_spacing, fm, 0_px));
+    }
 
     m_text_shadows.clear();
     if(const auto* tokens = el->get_token_property(_text_shadow_))
@@ -711,8 +732,6 @@ void litehtml::css_properties::compute_font(const html_tag* el, const document::
 
     font_description descr;
     descr.letter_spacing       = m_letter_spacing.val();
-    descr.word_spacing         = m_word_spacing.val();
-    descr.features             = merge_font_features(m_font_variant_numeric, m_font_feature_settings);
     descr.smoothing            = m_font_smoothing;
     if(!m_text_shadows.empty() && !m_text_shadows.front().inset)
     {
@@ -740,8 +759,26 @@ void litehtml::css_properties::compute_font(const html_tag* el, const document::
     descr.emphasis_style       = m_text_emphasis_style;
     descr.emphasis_color       = m_text_emphasis_color;
     descr.emphasis_position    = m_text_emphasis_position;
+    // Telegram: font-variant-numeric is inherited like font-variant; tabular-nums reaches the font.
+    m_font_variant_numeric = el->get_property<std::string>(_font_variant_numeric_, true, "", offset(m_font_variant_numeric));
+    bound_inherited_string(el, _font_variant_numeric_, m_font_variant_numeric, false, ""); // Telegram (VENDOR.md edit 21)
+    m_font_feature_settings = el->get_property<std::string>(_font_feature_settings_, true, "", offset(m_font_feature_settings));
+    bound_inherited_string(el, _font_feature_settings_, m_font_feature_settings, false, "");
+    // Nanogram fork: the merged feature list; only tnum fits font_description (tabular_nums), the whole list goes to
+    // the host with the font (document_container::create_font with features).
+    m_font_features    = merge_font_features(m_font_variant_numeric, m_font_feature_settings);
+    descr.tabular_nums = false;
+    for(size_t start = 0; start < m_font_features.size();)
+    {
+        size_t end = m_font_features.find(',', start);
+        if(end == std::string::npos)
+            end = m_font_features.size();
+        if(m_font_features.compare(start, 5, "tnum=") == 0 && m_font_features.compare(start, end - start, "tnum=0") != 0)
+            descr.tabular_nums = true;
+        start = end + 1;
+    }
 
-    m_font = doc->get_font(descr, &m_font_metrics);
+    m_font = doc->get_font(descr, &m_font_metrics, m_font_features);
 }
 
 void litehtml::css_properties::compute_background_color(const html_tag* el)
@@ -757,30 +794,41 @@ void litehtml::css_properties::compute_opacity(const html_tag* el)
 void litehtml::css_properties::compute_transform(const html_tag* el, const std::shared_ptr<document>& doc)
 {
     m_transform.clear();
-    // translate, rotate and scale apply first, in that order, then transform: each is the function of
-    // its name with the property's values as arguments.
-    for(string_id name : {_translate_, _rotate_, _scale_})
-    {
-        const auto* tokens = el->get_token_property(name);
-        if(!tokens || tokens->empty() || (tokens->size() == 1 && tokens->front().ident() == "none"))
-            continue;
-        std::string args;
-        for(const auto& tok : *tokens)
-            args += (args.empty() ? "" : ",") + tok.get_repr();
-        transform_vector functions;
-        if(parse_transform(normalize(_s(name) + "(" + args + ")", f_componentize | f_remove_whitespace), functions))
-            m_transform.insert(m_transform.end(), functions.begin(), functions.end());
-    }
     if(const auto* tokens = el->get_token_property(_transform_))
     {
-        transform_vector functions;
-        if(parse_transform(*tokens, functions))
-            m_transform.insert(m_transform.end(), functions.begin(), functions.end());
+        if(parse_transform(*tokens, m_transform))
+        {
+            for(auto& fn : m_transform)
+            {
+                doc->cvt_units(fn.x, m_font_metrics, 0_px);
+                doc->cvt_units(fn.y, m_font_metrics, 0_px);
+            }
+            // Telegram: as for box-shadow, a length that converts to a non-finite one leaves the transform unset.
+            bool finite = true;
+            for(const auto& fn : m_transform)
+                finite = finite && std::isfinite(fn.x.val()) && std::isfinite(fn.y.val());
+            if(!finite)
+                m_transform.clear();
+        }
     }
-    for(auto& fn : m_transform)
+    // Telegram (VENDOR.md edit 34): translate, rotate and scale, before transform's functions in that order (CSS
+    // Transforms 2 §6: translate · rotate · scale · transform, about the origin).
+    m_transform_individual = 0;
     {
-        doc->cvt_units(fn.x, m_font_metrics, 0_px);
-        doc->cvt_units(fn.y, m_font_metrics, 0_px);
+        transform_vector individual;
+        for(string_id name : {_translate_, _rotate_, _scale_})
+        {
+            const auto*        tokens = el->get_token_property(name);
+            transform_function fn;
+            if(!tokens || !parse_individual_transform(name, *tokens, fn))
+                continue;
+            doc->cvt_units(fn.x, m_font_metrics, 0_px);
+            doc->cvt_units(fn.y, m_font_metrics, 0_px);
+            if(std::isfinite(fn.x.val()) && std::isfinite(fn.y.val()))
+                individual.push_back(fn);
+        }
+        m_transform.insert(m_transform.begin(), individual.begin(), individual.end());
+        m_transform_individual = individual.size();
     }
 }
 
@@ -992,6 +1040,7 @@ void litehtml::css_properties::compute_effects(const html_tag* el, const documen
     compute_opacity(el);
     m_aspect_ratio    = el->get_property<float>(_aspect_ratio_, false, 0.f, offset(m_aspect_ratio));
     m_backface_hidden = el->get_property<int>(_backface_visibility_, false, 0, offset(m_backface_hidden));
+    m_transform_box   = el->get_property<int>(_transform_box_, false, transform_box_view_box, offset(m_transform_box));
     m_contain         = el->get_property<int>(_contain_, false, 0, offset(m_contain));
     if(m_contain)
     {
@@ -1085,6 +1134,23 @@ void litehtml::css_properties::compute_effects(const html_tag* el, const documen
     }
 
     compute_transform(el, doc);
+    // Telegram (VENDOR.md edit 37): object-fit and object-position (as background-position: one or two values).
+    m_object_fit        = el->get_property<int>(_object_fit_, false, object_fit_fill, offset(m_object_fit));
+    m_text_overflow     = el->get_property<int>(_text_overflow_, false, text_overflow_clip, offset(m_text_overflow)); // edit 40
+    m_object_position_x = css_length(50, css_units_percentage);
+    m_object_position_y = css_length(50, css_units_percentage);
+    if(const auto* tokens = el->get_token_property(_object_position_))
+    {
+        int        index = 0;
+        css_length x, y;
+        if(parse_bg_position(*tokens, index, x, y, true) && index == static_cast<int>(tokens->size()))
+        {
+            doc->cvt_units(x, m_font_metrics, 0_px);
+            doc->cvt_units(y, m_font_metrics, 0_px);
+            m_object_position_x = x;
+            m_object_position_y = y;
+        }
+    }
     m_transform_origin_x = css_length(50, css_units_percentage);
     m_transform_origin_y = css_length(50, css_units_percentage);
     if(const auto* tokens = el->get_token_property(_transform_origin_))
@@ -1093,18 +1159,6 @@ void litehtml::css_properties::compute_effects(const html_tag* el, const documen
         {
             doc->cvt_units(m_transform_origin_x, m_font_metrics, 0_px);
             doc->cvt_units(m_transform_origin_y, m_font_metrics, 0_px);
-        }
-    }
-    // transform-box: fill-box or stroke-box, whose centre is the same: the SVG shape's own box (el_svg).
-    m_transform_fill_box = false;
-    if(const auto* tokens = el->get_token_property(_transform_box_))
-    {
-        for(const auto& token : *tokens)
-        {
-            if(token.type == IDENT && (token.ident() == "fill-box" || token.ident() == "stroke-box"))
-            {
-                m_transform_fill_box = true;
-            }
         }
     }
 }

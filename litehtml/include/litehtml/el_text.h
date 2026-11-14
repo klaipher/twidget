@@ -18,6 +18,8 @@ namespace litehtml
         // Telegram (VENDOR.md edit 84): made as generated content (::before/::after content, a form control's parts).
         bool        m_generated = false;
         uint_ptr    m_measured_font = 0;
+        // Telegram (VENDOR.md edit 32.3): the measured width, before word-spacing.
+        pixel_t     m_measured_width = 0;
         int         m_measured_transform = -1;
         std::shared_ptr<text_breaker> m_breaker;
         mutable int8_t m_strong_direction = 2;  // 2: not looked at yet

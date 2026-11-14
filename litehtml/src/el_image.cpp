@@ -76,6 +76,44 @@ void litehtml::el_image::parse_attributes()
     }
 }
 
+// Telegram (VENDOR.md edit 37): the object rect (CSS Images 3 §5.5): object-fit sizes the natural size into the content
+// box, object-position places it by percentages of the space left over. fill, or no natural size, is the content box.
+static litehtml::position object_rect(const litehtml::position& box, const litehtml::size& natural,
+                                      const litehtml::css_properties& css)
+{
+    using namespace litehtml;
+    const object_fit fit = css.get_object_fit();
+    if(fit == object_fit_fill || natural.width <= 0_px || natural.height <= 0_px)
+        return box;
+    float       w  = float(natural.width);
+    float       h  = float(natural.height);
+    const float sx = float(box.width) / w;
+    const float sy = float(box.height) / h;
+    float       s  = 1;
+    switch(fit)
+    {
+    case object_fit_contain:
+        s = std::min(sx, sy);
+        break;
+    case object_fit_cover:
+        s = std::max(sx, sy);
+        break;
+    case object_fit_scale_down:
+        s = std::min(1.0f, std::min(sx, sy));
+        break;
+    default:
+        break;
+    }
+    w *= s;
+    h *= s;
+    position rect;
+    rect.width  = pixel_t(w);
+    rect.height = pixel_t(h);
+    rect.x      = box.x + css.get_object_position_x().calc_percent(box.width - pixel_t(w));
+    rect.y      = box.y + css.get_object_position_y().calc_percent(box.height - pixel_t(h));
+    return rect;
+}
+
 void litehtml::el_image::draw(uint_ptr hdc, pixel_t x, pixel_t y, const position* clip,
                               const std::shared_ptr<render_item>& ri)
 {
@@ -104,61 +142,24 @@ void litehtml::el_image::draw(uint_ptr hdc, pixel_t x, pixel_t y, const position
     }
 }
 
+// Upstream's object-fit / object-position (VENDOR.md edit 37) place the image; a container that reports an
+// SVG preserveAspectRatio for it (get_image_aspect) drives the fit and position when object-fit is the default fill.
 litehtml::position litehtml::el_image::fitted(const position& box)
 {
-    std::string fit = raw_declaration("object-fit");
-    trim(fit);
-    lcase(fit);
-    std::string aspect;
-    if(fit.empty() || fit == "fill")
-    {
-        aspect = get_document()->container()->get_image_aspect(m_src.c_str());
-        if(aspect.empty())
-            return box;
-        fit = aspect.find("slice") != std::string::npos ? "cover" : "contain";
-    }
     size natural;
     get_document()->container()->get_image_size(m_src.c_str(), nullptr, natural);
-    if(natural.width <= 0_px || natural.height <= 0_px)
-        return box;
+    if(css().get_object_fit() != object_fit_fill)
+        return object_rect(box, natural, css());
+    const std::string aspect = get_document()->container()->get_image_aspect(m_src.c_str());
+    if(aspect.empty() || natural.width <= 0_px || natural.height <= 0_px)
+        return object_rect(box, natural, css());
+    const bool  slice = aspect.find("slice") != std::string::npos;
     const float sx = (box.width / natural.width).value(), sy = (box.height / natural.height).value();
-    float       scale = 1;
-    if(fit == "contain")
-        scale = std::min(sx, sy);
-    else if(fit == "cover")
-        scale = std::max(sx, sy);
-    else if(fit == "scale-down")
-        scale = std::min(1.f, std::min(sx, sy));
+    const float scale = slice ? std::max(sx, sy) : std::min(sx, sy);
     const float w = natural.width.value() * scale, h = natural.height.value() * scale;
-    // object-position: keywords, percentages of the room left, or lengths from the box's corner.
-    std::string where = raw_declaration("object-position");
-    if(!aspect.empty())
-        where = std::string(aspect.find("xmin") != std::string::npos   ? "left"
-                            : aspect.find("xmax") != std::string::npos ? "right"
-                                                                       : "center") +
-                (aspect.find("ymin") != std::string::npos   ? " top"
-                 : aspect.find("ymax") != std::string::npos ? " bottom"
-                                                            : " center");
-    lcase(where);
-    string_vector parts;
-    split_string(where, parts, " ");
-    parts.erase(std::remove_if(parts.begin(), parts.end(), [](const std::string& s) { return s.empty(); }), parts.end());
-    if(parts.size() == 1)
-        parts.push_back(is_one_of(parts[0], "top", "bottom") ? parts[0] : "center");
-    if(parts.size() >= 2 && is_one_of(parts[0], "top", "bottom"))
-        std::swap(parts[0], parts[1]);
-    auto offset = [](const std::string& value, float room) {
-        if(value == "left" || value == "top")
-            return 0.f;
-        if(value == "right" || value == "bottom")
-            return room;
-        if(value.empty() || value == "center")
-            return room / 2;
-        float v = std::strtof(value.c_str(), nullptr);
-        return value.back() == '%' ? room * v / 100 : v;
-    };
-    const float dx = offset(parts.size() >= 2 ? parts[0] : "center", box.width.value() - w);
-    const float dy = offset(parts.size() >= 2 ? parts[1] : "center", box.height.value() - h);
+    const float room_x = box.width.value() - w, room_y = box.height.value() - h;
+    const float dx = aspect.find("xmin") != std::string::npos ? 0.f : aspect.find("xmax") != std::string::npos ? room_x : room_x / 2;
+    const float dy = aspect.find("ymin") != std::string::npos ? 0.f : aspect.find("ymax") != std::string::npos ? room_y : room_y / 2;
     return position(box.x + pixel_t(dx), box.y + pixel_t(dy), pixel_t(w), pixel_t(h));
 }
 

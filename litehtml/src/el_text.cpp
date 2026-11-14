@@ -4,6 +4,24 @@
 #include "render_inline.h"
 #include "document_container.h"
 
+namespace
+{
+    // Nanogram fork: the word-separator characters word-spacing widens (CSS Text 3 §8.1): U+0020 and U+00A0.
+    int word_separators(const std::string& text)
+    {
+        int n = 0;
+        for(size_t i = 0; i < text.size(); i++)
+        {
+            if(text[i] == ' ')
+                n++;
+            else if(static_cast<unsigned char>(text[i]) == 0xC2 && i + 1 < text.size() &&
+                    static_cast<unsigned char>(text[i + 1]) == 0xA0)
+                n++;
+        }
+        return n;
+    }
+} // namespace
+
 litehtml::el_text::el_text(const char* text, const document::ptr& doc) :
     element(doc)
 {
@@ -188,6 +206,17 @@ void litehtml::el_text::compute_styles(bool /*recursive*/)
                 m_use_transformed ? m_transformed_text.c_str() : m_text.c_str(), font);
             m_measured_font      = font;
             m_measured_transform = transform;
+            m_measured_width     = m_size.width; // Telegram (VENDOR.md edit 32.3)
+        }
+        // Telegram (VENDOR.md edit 32.3): word-spacing widens each space.
+        if(is_white_space() && el_parent)
+        {
+            m_size.width = m_measured_width + el_parent->css().get_word_spacing();
+        } else if(el_parent && get_document()->container()->word_spacing_on_every_separator())
+        {
+            // Nanogram fork: a host that asks for it also widens preserved spaces (white-space: pre and
+            // pre-wrap) and the no-break spaces inside a word, as it draws them (draw_spaced_text).
+            m_size.width = m_measured_width + el_parent->css().get_word_spacing() * word_separators(m_text);
         }
     }
     m_draw_spaces = fm.draw_spaces;
@@ -251,15 +280,34 @@ void litehtml::el_text::draw(uint_ptr hdc, pixel_t x, pixel_t y, const position*
             if(font)
             {
                 web_color color = el_parent->css().get_color();
-                const std::string& shown = text_item && text_item->is_fragment ? text_item->fragment_text : display_text();
-                if(text_item && text_item->cut >= 0)
+                // Telegram (VENDOR.md edit 40): a piece cut at its line's ellipsis draws only what fits.
+                const std::string& drawn = text_item && text_item->is_fragment ? text_item->fragment_text : display_text();
+                const int          bytes = ri->ellipsis_bytes();
+                // Nanogram fork: a host that widens every word separator places the run's pieces itself.
+                const pixel_t spacing = el_parent->css().get_word_spacing() != 0_px && !is_white_space() &&
+                                                doc->container()->word_spacing_on_every_separator()
+                                            ? el_parent->css().get_word_spacing()
+                                            : pixel_t(0);
+                const auto paint = [&](const char* text) {
+                    if(spacing != 0_px)
+                        doc->container()->draw_spaced_text(hdc, text, font, color, pos, spacing);
+                    else
+                        doc->container()->draw_text(hdc, text, font, color, pos);
+                };
+                if(bytes < 0)
+                    paint(drawn.c_str());
+                else if(bytes > 0)
+                    paint(drawn.substr(0, static_cast<size_t>(bytes)).c_str());
+                // The ellipsis, on this piece's baseline, in the block's font and colour.
+                const auto block = bytes >= 0 ? ri->ellipsis_block() : nullptr;
+                if(const uint_ptr block_font = block ? block->css().get_font() : 0)
                 {
-                    // text-overflow: ellipsis cut it (render_item_inline_context::apply_ellipsis).
-                    if(text_item->cut > 0)
-                        doc->container()->draw_text(hdc, shown.substr(0, text_item->cut).c_str(), font, color, pos);
-                } else
-                {
-                    doc->container()->draw_text(hdc, shown.c_str(), font, color, pos);
+                    const char* const   glyph = "\xE2\x80\xA6";
+                    const font_metrics& fm    = block->css().get_font_metrics();
+                    position ellipsis(pos.x + ri->ellipsis_at(),
+                                      pos.y + el_parent->css().get_font_metrics().ascent - fm.ascent,
+                                      doc->container()->text_width(glyph, block_font), fm.height);
+                    doc->container()->draw_text(hdc, glyph, block_font, block->css().get_color(), ellipsis);
                 }
             }
         }

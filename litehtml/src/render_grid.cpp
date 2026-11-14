@@ -262,6 +262,72 @@ namespace
         }
     }
 
+    // Grid §12.7.1, "Find the Size of an fr": the flexible tracks take `space` less the other tracks' sizes, shared by
+    // their flex factors (a sum under 1 counting as 1), except a track whose base is already larger, which keeps it and
+    // leaves the rest to the others. False when no track is flexible. Telegram (VENDOR.md edit 70): shared with the rows.
+    bool expand_flexible_tracks(std::vector<grid_track>& tracks, pixel_t space)
+    {
+        std::vector<grid_track*> flexible;
+        for(auto& track : tracks)
+        {
+            if(!track.collapsed && track.size.max_type == grid_track_size::fraction)
+            {
+                flexible.push_back(&track);
+            }
+        }
+        if(flexible.empty())
+        {
+            return false;
+        }
+        std::vector<bool> frozen(flexible.size(), false);
+        pixel_t           fr_size = 0_px;
+        for(int guard = 0; guard < 16; guard++)
+        {
+            pixel_t rest   = space;
+            float   sum_fr = 0;
+            for(const auto& track : tracks)
+            {
+                if(track.collapsed || track.size.max_type == grid_track_size::fraction)
+                {
+                    continue;
+                }
+                rest -= track.base;
+            }
+            for(size_t i = 0; i < flexible.size(); i++)
+            {
+                if(frozen[i])
+                {
+                    rest -= flexible[i]->base;
+                } else
+                {
+                    sum_fr += flexible[i]->size.fr;
+                }
+            }
+            fr_size = sum_fr > 1 ? rest / pixel_t(sum_fr) : rest;
+            bool changed = false;
+            for(size_t i = 0; i < flexible.size(); i++)
+            {
+                if(!frozen[i] && fr_size * pixel_t(flexible[i]->size.fr) < flexible[i]->base)
+                {
+                    frozen[i] = true;
+                    changed   = true;
+                }
+            }
+            if(!changed)
+            {
+                break;
+            }
+        }
+        for(size_t i = 0; i < flexible.size(); i++)
+        {
+            if(!frozen[i])
+            {
+                flexible[i]->base = std::max(flexible[i]->base, fr_size * pixel_t(flexible[i]->size.fr));
+            }
+        }
+        return true;
+    }
+
     void size_columns(std::vector<grid_track>& tracks, const std::vector<grid_cell>& cells, pixel_t available,
                       pixel_t gap, bool stretch_auto)
     {
@@ -414,62 +480,8 @@ namespace
             }
         }
 
-        std::vector<grid_track*> flexible;
-        for(auto& track : tracks)
+        if(expand_flexible_tracks(tracks, available - gaps))
         {
-            if(!track.collapsed && track.size.max_type == grid_track_size::fraction)
-            {
-                flexible.push_back(&track);
-            }
-        }
-        if(!flexible.empty())
-        {
-            std::vector<bool> frozen(flexible.size(), false);
-            pixel_t           fr_size = 0_px;
-            for(int guard = 0; guard < 16; guard++)
-            {
-                pixel_t rest   = available - gaps;
-                float   sum_fr = 0;
-                for(const auto& track : tracks)
-                {
-                    if(track.collapsed || track.size.max_type == grid_track_size::fraction)
-                    {
-                        continue;
-                    }
-                    rest -= track.base;
-                }
-                for(size_t i = 0; i < flexible.size(); i++)
-                {
-                    if(frozen[i])
-                    {
-                        rest -= flexible[i]->base;
-                    } else
-                    {
-                        sum_fr += flexible[i]->size.fr;
-                    }
-                }
-                fr_size = sum_fr > 1 ? rest / pixel_t(sum_fr) : rest;
-                bool changed = false;
-                for(size_t i = 0; i < flexible.size(); i++)
-                {
-                    if(!frozen[i] && fr_size * pixel_t(flexible[i]->size.fr) < flexible[i]->base)
-                    {
-                        frozen[i] = true;
-                        changed   = true;
-                    }
-                }
-                if(!changed)
-                {
-                    break;
-                }
-            }
-            for(size_t i = 0; i < flexible.size(); i++)
-            {
-                if(!frozen[i])
-                {
-                    flexible[i]->base = std::max(flexible[i]->base, fr_size * pixel_t(flexible[i]->size.fr));
-                }
-            }
         } else if(stretch_auto)
         {
             pixel_t free = available - used();
@@ -628,7 +640,7 @@ litehtml::rendered_width litehtml::render_item_grid::_render_content(pixel_t x, 
     for(auto& cell : cells)
     {
         const auto& width = cell.el->src_el()->css().get_width();
-        if(!width.is_predefined() && width.units() != css_units_percentage && width.units() != css_units_calc)
+        if(!width.is_predefined() && width.units() != css_units_percentage && !width.is_calc())
         {
             cell.el->render(0_px, 0_px, item_size.new_width(available), fmt_ctx);
             cell.max_content = cell.min_content = cell.el->width();
@@ -802,47 +814,12 @@ litehtml::rendered_width litehtml::render_item_grid::_render_content(pixel_t x, 
             }
         }
     }
+    // Telegram (VENDOR.md edit 70): a definite height's flexible rows take the size of an fr, as the columns do; the
+    // free space was added on top of each row's content, so a mark in the middle row of `repeat(3,1fr)` made that row
+    // its height taller than the others.
     if(definite_height && row_count > 0)
     {
-        // As the flexible columns: a share per fr, and a row whose content is more than its share keeps its content.
-        std::vector<bool> frozen(rows.size(), false);
-        pixel_t           fr_size = 0_px;
-        for(int guard = 0; guard < 16; guard++)
-        {
-            pixel_t rest   = container_height - row_gap * pixel_t(row_count - 1);
-            float   sum_fr = 0;
-            for(size_t r = 0; r < rows.size(); r++)
-            {
-                if(rows[r].size.max_type != grid_track_size::fraction || frozen[r])
-                {
-                    rest -= rows[r].base;
-                } else
-                {
-                    sum_fr += rows[r].size.fr;
-                }
-            }
-            fr_size      = sum_fr > 1 ? rest / pixel_t(sum_fr) : rest;
-            bool changed = false;
-            for(size_t r = 0; r < rows.size(); r++)
-            {
-                if(rows[r].size.max_type == grid_track_size::fraction && !frozen[r] && fr_size * pixel_t(rows[r].size.fr) < rows[r].base)
-                {
-                    frozen[r] = true;
-                    changed   = true;
-                }
-            }
-            if(!changed)
-            {
-                break;
-            }
-        }
-        for(size_t r = 0; r < rows.size(); r++)
-        {
-            if(rows[r].size.max_type == grid_track_size::fraction && !frozen[r])
-            {
-                rows[r].base = std::max(rows[r].base, fr_size * pixel_t(rows[r].size.fr));
-            }
-        }
+        expand_flexible_tracks(rows, container_height - row_gap * pixel_t(row_count - 1));
     }
 
     pixel_t row_start   = 0_px;

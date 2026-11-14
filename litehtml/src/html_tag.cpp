@@ -776,29 +776,6 @@ namespace litehtml
         return get_repr(value.get<css_token_vector>(), 0, -1, true);
     }
 
-    const property_value& html_tag::ua_property(string_id name) const
-    {
-        static const property_value& none = *new property_value();
-        auto doc = get_document();
-        if(!doc)
-            return none;
-        // The sheet is sorted by specificity and order, so the last match wins, unless an earlier one is important.
-        const property_value* found = &none;
-        for(const auto& sel : doc->master_css().selectors())
-        {
-            if(sel->m_layered)
-                continue;
-            const property_value& value = sel->m_style->get_property(name);
-            if(value.is<invalid>() || (found->m_important && !value.m_important) || !sel->is_media_valid())
-                continue;
-            int match = const_cast<html_tag*>(this)->select(*sel, true);
-            if(!(match & select_match) || (match & (select_match_with_before | select_match_with_after)))
-                continue;
-            found = &value;
-        }
-        return *found;
-    }
-
     // Telegram (VENDOR.md edit 21).
     const css_token_vector* html_tag::find_custom_property(string_id name) const
     {
@@ -808,12 +785,57 @@ namespace litehtml
             const property_value& value = tag->m_style.get_property(name);
             if(value.is<css_token_vector>())
                 return &value.get<css_token_vector>();
-            // A custom property set to initial (or another CSS-wide keyword) has no value: the guaranteed-invalid one.
-            if(value.is<css_wide_keyword>())
+            // Telegram (VENDOR.md edit 33): a custom property set to initial has no value (the guaranteed-invalid one).
+            if(value.is<initial>())
                 return nullptr;
             tag = dynamic_cast<const html_tag*>(tag->parent().get());
         }
         return nullptr;
+    }
+
+    // Telegram (VENDOR.md edit 33).
+    const property_value* html_tag::master_value(string_id name, bool layer) const
+    {
+        // The rules of the master's @layer (`layered`) or the engine's own, in the order they applied.
+        const auto cascaded = [&](bool layered) {
+            const property_value* result = nullptr;
+            for(const auto& usel : m_used_styles)
+            {
+                if(usel->m_sheet != 0 || !usel->m_used || (usel->m_selector->m_layer != 0) != layered) // edit 41: revert skips a layer
+                    continue;
+                bool pseudo_element = false;
+                for(const auto& attr : usel->m_selector->m_right.m_attrs)
+                    pseudo_element = pseudo_element || attr.type == select_pseudo_element;
+                if(pseudo_element)
+                    continue;
+                const property_value& value = usel->m_selector->m_style->get_property(name);
+                if(value.is<invalid>())
+                    continue;
+                if(!result || !result->m_important || value.m_important)
+                    result = &value;
+            }
+            return result;
+        };
+        // Edit 50: revert-layer rolls back to the layer, and past it as revert does when the layer sets nothing.
+        if(layer)
+        {
+            if(const property_value* value = cascaded(true))
+                return value;
+        }
+        return cascaded(false);
+    }
+
+    void html_tag::resolve_reverts()
+    {
+        m_style.resolve_reverts([this](string_id name, bool layer) { return master_value(name, layer); },
+                                [this](string_id name, size_t bytes) {
+                                    if(bytes == 0)
+                                        return true;
+                                    begin_splice(name);
+                                    const bool admitted = charge_splice(bytes);
+                                    end_splice();
+                                    return admitted;
+                                });
     }
 
     bool html_tag::charge_inherited(size_t bytes) const
@@ -883,7 +905,7 @@ namespace litehtml
             result = value.get<css_token_vector>();
             return true;
         }
-        if(value.is<css_wide_keyword>())
+        if(value.is<initial>()) // Telegram (VENDOR.md edit 33)
         {
             // invalid at computed-value time (style::subst_vars)
             if(invalid)
@@ -985,6 +1007,7 @@ namespace litehtml
         add_animated_style();    // Telegram (VENDOR.md edit 27)
         note_paint_attributes(); // Telegram (VENDOR.md edit 80)
         add_root_declarations(); // Telegram (VENDOR.md edit 26)
+        resolve_reverts();       // Telegram (VENDOR.md edit 33)
         if(m_style.has_var_property())
             note_reads_var(true); // Telegram (VENDOR.md edit 17)
         m_style.subst_vars(this);
@@ -1138,6 +1161,7 @@ namespace litehtml
             add_animated_style();    // Telegram (VENDOR.md edit 27)
         note_paint_attributes(); // Telegram (VENDOR.md edit 80)
             add_root_declarations(); // Telegram (VENDOR.md edit 26)
+            resolve_reverts();       // Telegram (VENDOR.md edit 33)
             if(m_style.has_var_property())
                 note_reads_var(true); // Telegram (VENDOR.md edit 17)
             m_style.subst_vars(this);

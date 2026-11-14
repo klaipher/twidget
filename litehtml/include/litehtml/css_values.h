@@ -300,8 +300,14 @@ namespace litehtml
     // ==========================================================
     // CSS units
     // ==========================================================
+#if 0
     inline constexpr auto css_units_strings =
-        split_css_values<17>("none;%;in;cm;mm;em;ex;pt;pc;px;vw;vh;vmin;vmax;rem;ch;-lh-calc");
+        split_css_values<17>("none;%;in;cm;mm;em;ex;pt;pc;px;vw;vh;vmin;vmax;rem;ch");
+#else
+    // Telegram (VENDOR.md edit 31.3): 16 names.
+    inline constexpr auto css_units_strings =
+        split_css_values<16>("none;%;in;cm;mm;em;ex;pt;pc;px;vw;vh;vmin;vmax;rem;ch");
+#endif
 
     enum css_units : uint8_t // see css_length
     {
@@ -321,8 +327,6 @@ namespace litehtml
         css_units_vmax,
         css_units_rem,
         css_units_ch,
-        // calc(), min(), max() or clamp() mixing units: the value is the expression's index (calc_evaluate)
-        css_units_calc,
     };
 
     // ==========================================================
@@ -394,14 +398,6 @@ namespace litehtml
     // ==========================================================
     // CSS Property: align
     // ==========================================================
-    inline constexpr auto direction_strings = split_css_values<2>("ltr;rtl");
-
-    enum direction
-    {
-        direction_ltr,
-        direction_rtl
-    };
-
     inline constexpr auto text_align_strings =
         split_css_values<7>("left;right;center;justify;start;end;-internal-th-center");
 
@@ -547,6 +543,16 @@ namespace litehtml
         overflow_wrap_anywhere
     };
 
+    // Telegram (VENDOR.md edit 46): direction (inherited); start and end resolve against it where a line is built.
+    inline constexpr auto direction_strings = split_css_values<2>("ltr;rtl");
+
+    enum direction
+    {
+        direction_ltr,
+        direction_rtl
+    };
+
+    // Telegram (VENDOR.md edit 32.2): word-break.
     inline constexpr auto word_break_strings = split_css_values<4>("normal;break-all;keep-all;break-word");
 
     enum word_break
@@ -565,6 +571,27 @@ namespace litehtml
         width_min_content,
         width_max_content,
         width_fit_content
+    };
+
+    // Telegram (VENDOR.md edit 40): text-overflow.
+    inline constexpr auto text_overflow_strings = split_css_values<2>("clip;ellipsis");
+
+    enum text_overflow
+    {
+        text_overflow_clip,
+        text_overflow_ellipsis
+    };
+
+    // Telegram (VENDOR.md edit 37): object-fit.
+    inline constexpr auto object_fit_strings = split_css_values<5>("fill;contain;cover;none;scale-down");
+
+    enum object_fit
+    {
+        object_fit_fill,
+        object_fit_contain,
+        object_fit_cover,
+        object_fit_none,
+        object_fit_scale_down
     };
 
     inline constexpr auto resize_strings = split_css_values<6>("none;both;horizontal;vertical;block;inline");

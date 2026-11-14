@@ -728,7 +728,7 @@ public:
 #ifdef TW_LITEHTML_TWIDGET
         // The fork folds viewport lengths to px as it parses, so a resize needs a fresh parse of a
         // document that has one. Media queries need no such care: a patched document re-evaluates them.
-        bool viewport_units = litehtml::has_viewport_units(html);
+        bool viewport_units = litehtml::text_may_hold_viewport_unit(html);
         bool stale = (viewport_changed || float(r_.width_) != rendered_width_) && (viewport_units || viewport_units_);
         viewport_units_ = viewport_units;
 #endif
@@ -1275,8 +1275,11 @@ public:
         return std::move(list_);
     }
     // ── document_container: fonts and text ──
-    litehtml::uint_ptr create_font(const litehtml::font_description& descr, const litehtml::document*, litehtml::font_metrics* fm) override {
-        Face* face = face_for(descr.family, float(descr.size), descr.weight, descr.style == litehtml::font_style_italic, descr.features);
+    litehtml::uint_ptr create_font(const litehtml::font_description& descr, const litehtml::document* doc, litehtml::font_metrics* fm) override {
+        return create_font(descr, descr.tabular_nums ? std::string("tnum=1") : std::string(), doc, fm);
+    }
+    litehtml::uint_ptr create_font(const litehtml::font_description& descr, const std::string& features, const litehtml::document*, litehtml::font_metrics* fm) override {
+        Face* face = face_for(descr.family, float(descr.size), descr.weight, descr.style == litehtml::font_style_italic, features);
         if (!face) return 0;
         const FontMetrics& m = face->metrics;
         face->uses++;
@@ -1288,7 +1291,7 @@ public:
         f.decoration = descr.decoration_line;
         f.decoration_color = descr.decoration_color;
         f.letter_spacing = descr.letter_spacing;
-        f.word_spacing = descr.word_spacing;
+        f.word_spacing = 0; // litehtml adds word-spacing to each space's width (13.2); draw_spaced_text paints it
         if (fm) {
             fm->font_size = descr.size;
             fm->ascent = litehtml::pixel_t(m.ascent);
@@ -1322,10 +1325,21 @@ public:
         return litehtml::pixel_t(it->second.width(backend_, text));
     }
     void draw_text(litehtml::uint_ptr, const char* text, litehtml::uint_ptr h, litehtml::web_color color, const litehtml::position& pos) override {
+        paint_text(text, h, color, pos, 0);
+    }
+    // litehtml widens every space and no-break space by word-spacing in layout (preserved ones too), and hands the
+    // run's word-spacing here, so that its pieces are painted where layout put them.
+    bool word_spacing_on_every_separator() const override { return true; }
+    void draw_spaced_text(litehtml::uint_ptr, const char* text, litehtml::uint_ptr h, litehtml::web_color color, const litehtml::position& pos,
+                          litehtml::pixel_t word_spacing) override {
+        paint_text(text, h, color, pos, float(word_spacing));
+    }
+    void paint_text(const char* text, litehtml::uint_ptr h, litehtml::web_color color, const litehtml::position& pos, float word_spacing) {
         if (litehtml::g_paint_trace) return;
         auto it = fonts_.find(h);
         if (it == fonts_.end() || !text || !*text) return;
-        const Font& f = it->second;
+        auto f = it->second;
+        f.word_spacing = word_spacing;
         Command c;
         c.kind = Cmd::Text;
         c.font = f.handle;
@@ -2109,7 +2123,9 @@ public:
         c.inset = shadow.inset;
         list_.push_back(std::move(c));
     }
-    void begin_group(litehtml::uint_ptr, const litehtml::paint_group& group) override {
+    void begin_group(litehtml::uint_ptr, const litehtml::paint_group& group) override { push_group(group, nullptr); }
+    void begin_group(litehtml::uint_ptr, const litehtml::paint_group& group, const litehtml::element* owner) override { push_group(group, owner); }
+    void push_group(const litehtml::paint_group& group, const litehtml::element* owner) {
         if (litehtml::g_paint_trace) return;
         // Backface visibility needs the accumulated matrix: a flip undone by an outer flip is a front face.
         litehtml::transform_matrix total = groups_.empty() ? group.matrix : group.matrix.then(groups_.back());
@@ -2124,7 +2140,7 @@ public:
         if (no_effects_ && c.opacity < 1) {
             // A box that was invisible stays so, without a group to blend; a disabled button keeps its dimming.
             if (c.opacity <= 0) c.hidden = true;
-            else if (!(group.owner && group.owner->tag() == litehtml::_button_ && group.owner->get_attr("disabled"))) c.opacity = 1;
+            else if (!(owner && owner->tag() == litehtml::_button_ && owner->get_attr("disabled"))) c.opacity = 1;
         }
         c.rect = rect_of(group.bounds);
         list_.push_back(std::move(c));
@@ -2184,7 +2200,11 @@ public:
         list_.push_back(pop);
         return true;
     }
-    void draw_path(litehtml::uint_ptr, const litehtml::vector_path& path) override {
+    void draw_path(litehtml::uint_ptr, const litehtml::vector_path& path) override { record_path(path, nullptr); }
+    void draw_path_stroke_gradient(litehtml::uint_ptr, const litehtml::vector_path& path, const litehtml::svg_gradient& stroke) override {
+        record_path(path, &stroke);
+    }
+    void record_path(const litehtml::vector_path& path, const litehtml::svg_gradient* stroke_gradient) {
         if (litehtml::g_paint_trace) return;
         if (!path.fill && !path.stroke) return;
         auto p = std::make_shared<Path>();
@@ -2206,11 +2226,13 @@ public:
         p->miter_limit = path.miter_limit;
         p->dashes = path.dashes;
         p->dash_offset = path.dash_offset;
-        const auto& sg = path.stroke_gradient;
-        p->stroke_gradient = sg.type;
-        const float sa[7] = {sg.x1, sg.y1, sg.x2, sg.y2, sg.r, sg.fx, sg.fy};
-        std::copy(std::begin(sa), std::end(sa), p->sg);
-        for (const auto& [offset, color] : sg.stops) p->stroke_stops.push_back(Stop{offset, color_of(color)});
+        if (stroke_gradient) {
+            const auto& sg = *stroke_gradient;
+            p->stroke_gradient = sg.type;
+            const float sa[7] = {sg.x1, sg.y1, sg.x2, sg.y2, sg.r, sg.fx, sg.fy};
+            std::copy(std::begin(sa), std::end(sa), p->sg);
+            for (const auto& [offset, color] : sg.stops) p->stroke_stops.push_back(Stop{offset, color_of(color)});
+        }
         Command c;
         c.kind = Cmd::Path;
         c.path = std::move(p);
@@ -5622,7 +5644,7 @@ const std::vector<Renderer::TextRun>& Renderer::text_runs() const {
                     add(owner, block, fragment->fragment_text, &box, font, can);
                 }
             } else {
-                add(owner, block, item && item->cut >= 0 ? shown.substr(0, size_t(item->cut)) : shown, &placed, font, can);
+                add(owner, block, ri->ellipsis_hidden() ? std::string() : ri->ellipsis_bytes() >= 0 ? shown.substr(0, size_t(ri->ellipsis_bytes())) : shown, &placed, font, can);
             }
         });
     };

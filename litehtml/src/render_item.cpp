@@ -1545,7 +1545,6 @@ void litehtml::render_item::draw_group(uint_ptr hdc, pixel_t x, pixel_t y, const
     paint_group group;
     group.opacity         = el_css.get_opacity();
     group.backface_hidden = el_css.get_backface_hidden();
-    group.owner           = el->src_el().get();
     group.bounds          = border_box;
     el->get_redraw_box(group.bounds, x, y);
     if(group.opacity < 1)
@@ -1580,7 +1579,7 @@ void litehtml::render_item::draw_group(uint_ptr hdc, pixel_t x, pixel_t y, const
     }
 
     auto container = src_el()->doc_ptr()->container();
-    container->begin_group(hdc, group);
+    container->begin_group(hdc, group, el->src_el().get());
     const bool shaped = !el_css.get_clip_path().empty();
     if(shaped) container->set_clip_path(el_css.get_clip_path().resolve(border_box));
     const position* inner_clip = group.matrix.is_identity() ? clip : nullptr;
@@ -1702,6 +1701,8 @@ void litehtml::render_item::draw_children(uint_ptr hdc, pixel_t x, pixel_t y, co
     for(const auto& el : m_children)
     {
         if(!doc->skip_paint.empty() && doc->skip_paint.count(el->src_el().get()))
+            continue;
+        if(el->ellipsis_hidden()) // Telegram (VENDOR.md edit 40): past its line's ellipsis
             continue;
         if(cull && el->ink(generation, true).misses(*clip, pos.x.value(), pos.y.value()))
             continue;
@@ -2357,7 +2358,7 @@ void litehtml::render_item::calc_cb_length(const css_length& len, pixel_t percen
     if(!len.is_predefined())
     {
         // A calc length still has a % part after unit conversion: it depends on the base as one does.
-        if(len.units() == litehtml::css_units_percentage || len.units() == litehtml::css_units_calc)
+        if(len.units() == litehtml::css_units_percentage || len.is_calc())
         {
             out_value.value = len.calc_percent(percent_base);
             out_value.type  = litehtml::containing_block_context::cbc_value_type_percentage;
@@ -2433,7 +2434,7 @@ litehtml::containing_block_context litehtml::render_item::calculate_containing_b
             }
             if(height != nullptr)
             {
-                if((height->units() == css_units_percentage || height->units() == css_units_calc) &&
+                if((height->units() == css_units_percentage || height->is_calc()) &&
                    (cb_context.height.type == containing_block_context::cbc_value_type_auto ||
                     cb_context.height.type == containing_block_context::cbc_value_type_none))
                 {

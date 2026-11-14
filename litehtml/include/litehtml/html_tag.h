@@ -209,8 +209,6 @@ namespace litehtml
         const Type& get_property(string_id name, bool inherited, const Type& default_value,
                                  uint_ptr css_properties_member_offset) const;
         std::string raw_declaration(const std::string& name) const;
-        /// What the UA stylesheet alone gives this element for `name` (`revert`); invalid when nothing.
-        const property_value& ua_property(string_id name) const;
         // false when the property is not set, or (*invalid then true) set to the guaranteed-invalid value
         bool        get_custom_property(string_id name, css_token_vector& result, bool* invalid = nullptr) const;
         // Telegram (VENDOR.md edit 21): the value get_custom_property would copy, without copying it (null if none).
@@ -226,6 +224,12 @@ namespace litehtml
         // back what it charged, before the element is computed again.
         bool        charge_inherited(size_t bytes) const;
         void        refund_inherited() const;
+        // Telegram (VENDOR.md edit 33): the master sheet's cascaded value of `name` for this element (nullptr if it
+        // declares none): its matched master rules that style the element itself, in the order they applied. Edit 50:
+        // with `layer` (revert-layer), the master's @layer rules' value when they set one, else the engine's.
+        const property_value* master_value(string_id name, bool layer = false) const;
+        // Replaces revert declarations with master_value, charging a copy as a var() splice; before subst_vars.
+        void                  resolve_reverts();
         // Telegram (VENDOR.md edit 21): refresh in document order, for a document whose replay could pass the budget.
         void        refresh_clear_styles();
         void        refresh_replay_styles(int sheet);
@@ -235,10 +239,11 @@ namespace litehtml
         {
             return m_style.get_property(name).is<std::string>();
         }
+        // Telegram (VENDOR.md edit 33): unset is no declaration of its own.
         bool has_own_property(string_id name) const
         {
             const property_value& value = m_style.get_property(name);
-            return !value.is<invalid>();
+            return !value.is<invalid>() && !value.is<unset>();
         }
         // Telegram (VENDOR.md edit 54): the element's cascaded value of `name` as litehtml parsed it (invalid without one),
         // shorthands expanded, for getComputedStyle's longhands litehtml computes on some elements only.
@@ -317,23 +322,18 @@ namespace litehtml
     const Type& html_tag::get_property(string_id name, bool inherited, const Type& default_value,
                                        uint_ptr css_properties_member_offset) const
     {
-        const property_value& declared = m_style.get_property(name);
-        const property_value& value =
-            declared.is<css_wide_keyword>() && declared.get<css_wide_keyword>().kind == css_wide_keyword::revert
-                ? ua_property(name)
-                : declared;
+        const property_value& value = m_style.get_property(name);
 
         if(value.is<Type>())
         {
             return value.get<Type>();
         }
-        // initial, and unset on a property that does not inherit (a revert the UA sheet has no value for is unset)
-        if(declared.is<css_wide_keyword>() && !value.is<inherit>() &&
-           (!inherited || declared.get<css_wide_keyword>().kind == css_wide_keyword::initial))
+        // Telegram (VENDOR.md edit 33): initial is the initial value; unset falls through as no declaration does.
+        if(value.is<initial>())
         {
             return default_value;
         }
-        if(inherited || value.is<inherit>() || declared.is<css_wide_keyword>())
+        if(inherited || value.is<inherit>())
         {
             if(auto _parent = parent())
             {

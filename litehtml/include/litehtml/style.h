@@ -18,21 +18,30 @@ namespace litehtml
     struct inherit
     {
     }; // "inherit" was specified as the value of this property
-    // "initial", "unset" or "revert": what they stand for depends on the element and the property, so
-    // html_tag::get_property resolves them when it is read.
-    struct css_wide_keyword
+    // Telegram (VENDOR.md edit 33): the other CSS-wide keywords as declared values. html_tag::get_property answers
+    // initial with the property's initial value and unset as if nothing were declared; html_tag::resolve_reverts
+    // replaces revert (and revert-layer) with the master sheet's value before the element computes.
+    struct initial
     {
-        enum kind_t
-        {
-            initial,
-            unset,
-            revert
-        } kind = initial;
+    };
+    struct unset
+    {
+    };
+    struct revert
+    {
+        // Telegram (VENDOR.md edit 50): revert-layer, which stops at the master's @layer (edit 41) where revert skips it.
+        bool layer = false;
     };
 
+#if 0
     struct property_value
-        : variant<invalid, inherit, css_wide_keyword, int, int_vector, css_length, length_vector, float, web_color, std::vector<image>,
+        : variant<invalid, inherit, int, int_vector, css_length, length_vector, float, web_color, std::vector<image>,
                   std::string, std::vector<std::string>, size_vector, css_token_vector>
+#else
+    struct property_value
+        : variant<invalid, inherit, int, int_vector, css_length, length_vector, float, web_color, std::vector<image>,
+                  std::string, std::vector<std::string>, size_vector, css_token_vector, initial, unset, revert>
+#endif
     {
         bool m_important = false;
         bool m_has_var   = false; // css_token_vector, parsing is delayed because of var()
@@ -149,9 +158,17 @@ namespace litehtml
         void subst_vars(const html_tag* el);
         void replace_properties(const std::vector<string_id>& names, const style& base, style& patch);
 
+        // Telegram (VENDOR.md edit 33): replaces each revert with `master(name)`, the master sheet's value (nullptr:
+        // none, so it is unset), keeping the reverting declaration's importance and order. `admit` is asked for the
+        // heap a copy holds before it is made; refused, the property is unset.
+        void resolve_reverts(const std::function<const property_value*(string_id, bool)>& master,
+                             const std::function<bool(string_id, size_t)>&                 admit);
+
       private:
         void inherit_property(string_id name, bool important);
-        void keyword_property(string_id name, const property_value& value);
+        // Telegram (VENDOR.md edit 33): `marker` (initial, unset or revert) over a shorthand's longhands, as
+        // inherit_property does.
+        void global_keyword_property(string_id name, const property_value& marker);
 
         void parse_background(const css_token_vector& tokens, const std::string& baseurl, bool important,
                               document_container* container);

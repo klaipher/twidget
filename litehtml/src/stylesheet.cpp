@@ -237,13 +237,11 @@ namespace litehtml
                     // is ignored, and the rules of a layer block are used as if they were not layered.
                     if(rule->block.type == CURLY_BLOCK)
                     {
-                        m_layer_depth++;
                         // Telegram (VENDOR.md edit 41): in the master sheet the block is a layer of its own.
                         const int outer = m_layer;
                         if(m_layered_origins)
                             m_layer = ++m_layer_count;
                         parse_css_stylesheet(rule->block.value, baseurl, doc, media, false);
-                        m_layer_depth--;
                         m_layer = outer;
                         import_allowed = false;
                     }

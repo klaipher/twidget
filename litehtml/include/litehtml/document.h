@@ -558,7 +558,7 @@ namespace litehtml
         {
             return m_mode;
         }
-        uint_ptr  get_font(const font_description& descr, font_metrics* fm);
+        uint_ptr  get_font(const font_description& descr, font_metrics* fm, const std::string& features = std::string());
         pixel_t   render(pixel_t max_width, render_type rt = render_all);
         void      draw(uint_ptr hdc, pixel_t x, pixel_t y, const position* clip, bool cull = false);
         uint32_t  paint_generation() const { return m_paint_generation; }
@@ -578,6 +578,8 @@ namespace litehtml
             return m_def_color;
         }
         void                         cvt_units(css_length& val, const font_metrics& metrics, pixel_t size) const;
+        // Telegram (VENDOR.md edit 48): what a calc's font-relative terms are worth for `metrics`.
+        calc_fonts                   calc_fonts_for(const font_metrics& metrics) const;
         pixel_t                      to_pixels(const css_length& val, const font_metrics& metrics, pixel_t size) const;
         pixel_t                      width() const;
         pixel_t                      height() const;
@@ -1107,7 +1109,7 @@ namespace litehtml
         static size_t matching_bound(const std::shared_ptr<element>& root, const pseudo_element_tags& creators);
 
       private:
-        uint_ptr add_font(const font_description& descr, font_metrics* fm);
+        uint_ptr add_font(const font_description& descr, font_metrics* fm, const std::string& features = std::string());
         void     build_template();
         int      update_from_template(const std::string& html, bool* changed);
         int      apply_template_values(std::vector<std::pair<size_t, std::string>>& changes, bool* changed);

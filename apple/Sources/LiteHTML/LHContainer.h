@@ -112,7 +112,8 @@ class LHContainer : public litehtml::document_container
     void set_draw_ops(std::vector<LHDrawOp>* ops) { m_ops = ops; }
     void set_shape_capture(std::vector<LHShapeData>* shapes) { m_shapes = shapes; m_shapes_bad = false; }
     bool shape_capture_failed() const { return m_shapes_bad; }
-    void capture_shape(const litehtml::vector_path& path);
+    void capture_shape(const litehtml::vector_path& path, bool stroke_gradient = false);
+    void draw_path_with_stroke(litehtml::uint_ptr hdc, const litehtml::vector_path& path, const litehtml::svg_gradient* stroke_gradient);
     void set_clip_culling(bool enabled) { m_clip_culling = enabled; }
     static std::atomic<bool> s_text_batching;
     static std::atomic<bool> s_exact_group_bounds;
@@ -152,6 +153,8 @@ class LHContainer : public litehtml::document_container
 
     litehtml::uint_ptr create_font(const litehtml::font_description& descr, const litehtml::document* doc,
                                    litehtml::font_metrics* fm) override;
+    litehtml::uint_ptr create_font(const litehtml::font_description& descr, const std::string& features,
+                                   const litehtml::document* doc, litehtml::font_metrics* fm) override;
     void               delete_font(litehtml::uint_ptr hFont) override;
     static CTFontRef    native_font(litehtml::uint_ptr hFont);
     litehtml::pixel_t  text_width(const char* text, litehtml::uint_ptr hFont) override;
@@ -184,6 +187,7 @@ class LHContainer : public litehtml::document_container
                          const litehtml::shadow_paint& shadow) override;
     void begin_group(litehtml::uint_ptr hdc, const litehtml::paint_group& group) override;
     void draw_path(litehtml::uint_ptr hdc, const litehtml::vector_path& path) override;
+    void draw_path_stroke_gradient(litehtml::uint_ptr hdc, const litehtml::vector_path& path, const litehtml::svg_gradient& stroke) override;
     void suspend_clips() override;
     void resume_clips() override;
     void end_group(litehtml::uint_ptr hdc) override;

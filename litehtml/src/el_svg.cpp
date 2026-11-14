@@ -1,9 +1,11 @@
 #include <unordered_set>
+#include <unordered_map>
+#include <algorithm>
+#include <functional>
 #include <atomic>
 #include <cstring>
 #include <cmath>
 #include <cctype>
-#include <functional>
 #include "html.h"
 #include "el_svg.h"
 #include "render_item.h"
@@ -428,83 +430,31 @@ namespace litehtml
             }
         };
 
-        // The shape's own box, from the extrema of its curves, not their control points.
-        static bool svg_fill_bounds(const element::ptr& el, position& box)
-        {
-            vector_path path;
-            if(!svg_geometry(el, path)) return false;
-            float min_x = INFINITY, min_y = INFINITY, max_x = -INFINITY, max_y = -INFINITY;
-            auto include = [&](float x, float y) {
-                min_x = std::min(min_x, x); min_y = std::min(min_y, y);
-                max_x = std::max(max_x, x); max_y = std::max(max_y, y);
-            };
-            float x = 0, y = 0, sx = 0, sy = 0;
-            size_t index = 0;
-            for(auto op : path.ops)
-            {
-                if(op == vector_path::close) { x = sx; y = sy; continue; }
-                int count = op == vector_path::cubic ? 6 : op == vector_path::quad ? 4 : 2;
-                if(index + count > path.points.size()) return false;
-                const float* v = path.points.data() + index;
-                float ex = v[count - 2], ey = v[count - 1];
-                include(ex, ey);
-                if(op == vector_path::move) { sx = ex; sy = ey; }
-                if(op == vector_path::quad || op == vector_path::cubic)
-                {
-                    auto at = [&](float t) {
-                        if(t <= 0 || t >= 1 || !std::isfinite(t)) return;
-                        float u = 1 - t;
-                        if(op == vector_path::quad)
-                            include(u*u*x + 2*u*t*v[0] + t*t*ex, u*u*y + 2*u*t*v[1] + t*t*ey);
-                        else
-                            include(u*u*u*x + 3*u*u*t*v[0] + 3*u*t*t*v[2] + t*t*t*ex,
-                                    u*u*u*y + 3*u*u*t*v[1] + 3*u*t*t*v[3] + t*t*t*ey);
-                    };
-                    for(int axis = 0; axis < 2; axis++)
-                    {
-                        float p0 = axis ? y : x, p1 = v[axis];
-                        if(op == vector_path::quad)
-                        {
-                            float p2 = v[axis + 2], denominator = p0 - 2*p1 + p2;
-                            if(denominator != 0) at((p0 - p1) / denominator);
-                        } else
-                        {
-                            float p2 = v[axis + 2], p3 = v[axis + 4];
-                            float a = -p0 + 3*p1 - 3*p2 + p3, b = 2*(p0 - 2*p1 + p2), c = p1 - p0;
-                            if(std::abs(a) < 1e-7f) { if(b != 0) at(-c / b); }
-                            else
-                            {
-                                float d = b*b - 4*a*c;
-                                if(d >= 0) { float root = std::sqrt(d); at((-b + root)/(2*a)); at((-b - root)/(2*a)); }
-                            }
-                        }
-                    }
-                }
-                x = ex; y = ey; index += count;
-            }
-            if(!std::isfinite(min_x) || !std::isfinite(min_y) ||
-               !std::isfinite(max_x - min_x) || !std::isfinite(max_y - min_y)) return false;
-            box = position(pixel_t(min_x), pixel_t(min_y), pixel_t(max_x - min_x), pixel_t(max_y - min_y));
-            return true;
-        }
-
-        static litehtml::transform_matrix svg_css_transform(const element::ptr& el, const litehtml::position& border_box)
+        static litehtml::transform_matrix svg_css_transform(const element::ptr& el, const litehtml::position& view)
         {
             using namespace litehtml;
             const auto& el_css = el->css();
             const auto tag = std::dynamic_pointer_cast<html_tag>(el);
             const bool has_origin = tag && tag->has_own_property(_transform_origin_);
-            // transform-box: fill-box: the shape's own box in place of the view box, and its corner the default origin.
-            position box = border_box;
-            bool     fill_box = false;
-            position bounds;
-            if(el_css.get_transform_fill_box() && svg_fill_bounds(el, bounds))
+            // Telegram (VENDOR.md edit 72): the reference box is the view box, or with transform-box: fill-box a shape's
+            // geometry box, whose top left is the initial origin (`0 0`); an element with no geometry of its own (a
+            // group, text) keeps the view box.
+            position border_box = view;
+            bool     fill_box   = false;
+            if(el_css.get_transform_box() == transform_box_fill_box)
             {
-                box      = bounds;
-                fill_box = true;
+                vector_path path;
+                float       box[4];
+                if(svg_geometry(el, path) && svg_path_bounds(path, box))
+                {
+                    border_box = position(pixel_t(box[0]), pixel_t(box[1]), pixel_t(box[2]), pixel_t(box[3]));
+                    fill_box   = true;
+                }
             }
-            pixel_t ox = has_origin ? box.x + el_css.get_transform_origin_x().calc_percent(box.width) : fill_box ? box.x : 0_px;
-            pixel_t oy = has_origin ? box.y + el_css.get_transform_origin_y().calc_percent(box.height) : fill_box ? box.y : 0_px;
+            pixel_t ox = has_origin ? border_box.x + el_css.get_transform_origin_x().calc_percent(border_box.width)
+                                    : (fill_box ? border_box.x : 0_px);
+            pixel_t oy = has_origin ? border_box.y + el_css.get_transform_origin_y().calc_percent(border_box.height)
+                                    : (fill_box ? border_box.y : 0_px);
             transform_matrix m{1, 0, 0, 1, -ox.value(), -oy.value()};
             const auto&      functions = el_css.get_transform();
             for(auto it = functions.rbegin(); it != functions.rend(); ++it)
@@ -513,8 +463,8 @@ namespace litehtml
                 switch(it->kind)
                 {
                 case transform_function::translate:
-                    f.tx = it->x.calc_percent(box.width).value();
-                    f.ty = it->y.calc_percent(box.height).value();
+                    f.tx = it->x.calc_percent(border_box.width).value();
+                    f.ty = it->y.calc_percent(border_box.height).value();
                     break;
                 case transform_function::scale:
                     f.a = it->v[0];
@@ -618,29 +568,67 @@ namespace litehtml
             return m;
         }
 
-        thread_local std::vector<std::pair<const element*, element::ptr>> use_hosts;
-
-        struct use_host_scope
+        // Telegram (VENDOR.md edit 72): an element's transform in its parent's user space, for the painter and
+        // svg_element_transform alike: its CSS transform about its reference box in the view `view`, else its attribute.
+        transform_matrix element_transform(const element::ptr& el, const float view[4])
         {
-            use_host_scope(const element::ptr& target, const element::ptr& use) { use_hosts.emplace_back(target.get(), use); }
-            ~use_host_scope() { use_hosts.pop_back(); }
+            const auto tag = std::dynamic_pointer_cast<html_tag>(el);
+            return tag && tag->has_own_property(_transform_)
+                       ? svg_css_transform(el, position(pixel_t(view[0]), pixel_t(view[1]), pixel_t(view[2]), pixel_t(view[3])))
+                       : parse_svg_transform(el->get_attr("transform"));
+        }
+
+        // Telegram (VENDOR.md edit 58): the <use> instances being drawn on this thread, innermost last, each its target
+        // and the use. An instance inherits from its use (SVG 2 §5.6.3), so above a target the inheritance walk goes on
+        // at the use, not at the target's own parent. Thread-local: tiles are drawn in parallel.
+        thread_local std::vector<std::pair<const element*, element::ptr>> t_use_instances;
+
+        // Holds one instance on t_use_instances for its scope, so a throw while it is drawn cannot leave it there.
+        struct use_instance_scope
+        {
+            use_instance_scope(const element* target, const element::ptr& use) { t_use_instances.emplace_back(target, use); }
+            ~use_instance_scope() { t_use_instances.pop_back(); }
+            use_instance_scope(const use_instance_scope&)            = delete;
+            use_instance_scope& operator=(const use_instance_scope&) = delete;
         };
 
-        element::ptr svg_parent(const element::ptr& el)
+        element::ptr svg_inheritance_parent(const element::ptr& el)
         {
-            for(auto it = use_hosts.rbegin(); it != use_hosts.rend(); ++it)
+            for(auto it = t_use_instances.rbegin(); it != t_use_instances.rend(); ++it)
             {
                 if(it->first == el.get())
-                {
                     return it->second;
-                }
             }
             return el->parent();
         }
 
+        // Edit 58: currentColor inside an instance is the colour along the instance's chain: the nearest element on it
+        // that declares color, else the use's own computed colour (inherited in the use's real context).
+        web_color svg_current_color(const element::ptr& el)
+        {
+            if(t_use_instances.empty())
+                return el->css().get_color();
+            for(element::ptr cur = el; cur; cur = svg_inheritance_parent(cur))
+            {
+                const auto* tag = dynamic_cast<const html_tag*>(cur.get());
+                if(tag && tag->has_own_property(_color_))
+                    return cur->css().get_color();
+                for(const auto& instance : t_use_instances)
+                {
+                    if(instance.second == cur)
+                        return cur->css().get_color();
+                }
+            }
+            return el->css().get_color();
+        }
+
         css_token_vector svg_property(const element::ptr& el, string_id name, bool inherited)
         {
-            for(element::ptr cur = el; cur; cur = svg_parent(cur))
+#if 0
+            for(element::ptr cur = el; cur; cur = cur->parent())
+#else
+            for(element::ptr cur = el; cur; cur = svg_inheritance_parent(cur)) // Telegram (VENDOR.md edit 58)
+#endif
             {
                 if(const auto* tag = dynamic_cast<const html_tag*>(cur.get()))
                 {
@@ -692,7 +680,7 @@ namespace litehtml
                 }
                 if(ident == "currentcolor")
                 {
-                    out = el->css().get_color();
+                    out = svg_current_color(el); // Telegram (VENDOR.md edit 58)
                     return true;
                 }
                 if(tok.type == URL || (tok.type == CV_FUNCTION && lowcase(tok.name()) == "url"))
@@ -916,11 +904,12 @@ namespace litehtml
             element::ptr        m_hit;
             bool                m_cache_groups = false;
             position            m_cache_bounds;
-            // Telegram (VENDOR.md edit 38): what is left of this paint's share of the document's budget of elements drawn
-            // inside <use> instances (el_svg::use_budget). It bounds a <use> chain's exponential fan-out: the depth limit
-            // alone does not, and a budget per painter let every <svg> of a document draw it again.
-            static constexpr int kMaxUseElements = 8192;
-            int                  m_use_elements  = kMaxUseElements;
+            // Telegram (VENDOR.md edit 38): <use>. The targets being instantiated, innermost last, and what is left of
+            // this paint's share of the document's budget of elements drawn inside instances (el_svg::use_budget).
+            static constexpr size_t     kMaxUseDepth    = 8;
+            static constexpr int        kMaxUseElements = 8192;
+            std::vector<const element*> m_use_stack;
+            int                         m_use_elements = kMaxUseElements;
 
             bool hits(float x0, float y0, float x1, float y1, float slop) const
             {
@@ -974,8 +963,10 @@ namespace litehtml
                     return;
                 }
                 path.fill   = svg_paint(el, _fill_, web_color::black, true, path.fill_color, m_container);
-                bool stroke_gradient = false;
-                path.stroke = svg_paint(el, _stroke_, web_color::black, false, path.stroke_color, m_container, &stroke_gradient);
+                bool stroke_url = false;
+                path.stroke = svg_paint(el, _stroke_, web_color::black, false, path.stroke_color, m_container, &stroke_url);
+                svg_gradient stroke_gradient; // Nanogram: not a vector_path field (13.2 layout); drawn via draw_path_stroke_gradient
+                bool         has_stroke_gradient = false;
                 path.fill_color   = with_opacity(path.fill_color, svg_number(el, _fill_opacity_, 1));
                 if(!path.fill && svg_gradient_paint(el, _fill_, path, path.fill_gradient, svg_number(el, _fill_opacity_, 1), m_container))
                 {
@@ -983,10 +974,12 @@ namespace litehtml
                     path.fill_color = path.fill_gradient.stops.back().second;
                 }
                 path.stroke_color = with_opacity(path.stroke_color, svg_number(el, _stroke_opacity_, 1));
-                if(!path.stroke && stroke_gradient && svg_gradient_paint(el, _stroke_, path, path.stroke_gradient, svg_number(el, _stroke_opacity_, 1), m_container))
+                if(!path.stroke && stroke_url &&
+                   svg_gradient_paint(el, _stroke_, path, stroke_gradient, svg_number(el, _stroke_opacity_, 1), m_container))
                 {
-                    path.stroke       = true;
-                    path.stroke_color = path.stroke_gradient.stops.back().second;
+                    path.stroke         = true;
+                    path.stroke_color   = stroke_gradient.stops.back().second;
+                    has_stroke_gradient = true;
                 }
                 path.evenodd      = svg_ident(el, _fill_rule_) == "evenodd";
                 path.stroke_width = std::max(0.f, svg_number(el, _stroke_width_, 1));
@@ -1015,37 +1008,291 @@ namespace litehtml
                 }
                 if(path.fill || path.stroke)
                 {
-                    m_container->draw_path(m_hdc, path);
+                    if(has_stroke_gradient)
+                        m_container->draw_path_stroke_gradient(m_hdc, path, stroke_gradient);
+                    else
+                        m_container->draw_path(m_hdc, path);
                 }
             }
 
             void draw_text(const element::ptr& el)
             {
-                position                  box;
-                std::vector<svg_text_run> runs;
-                if(!svg_text_runs(el, m_container, runs, box))
+#if 0
+                std::string text;
+                el->get_text(text);
+                std::string collapsed;
+                bool        space = false;
+                for(char ch : text)
+                {
+                    if(std::isspace(static_cast<unsigned char>(ch)))
+                    {
+                        space = !collapsed.empty();
+                        continue;
+                    }
+                    if(space)
+                    {
+                        collapsed += ' ';
+                        space = false;
+                    }
+                    collapsed += ch;
+                }
+                uint_ptr font = el->css().get_font();
+                if(collapsed.empty() || !font)
                 {
                     return;
                 }
-                for(const auto& run : runs)
+                web_color color;
+                if(!svg_paint(el, _fill_, web_color::black, true, color, m_container))
                 {
-                    const position& pos = run.box;
+                    return;
+                }
+                color = with_opacity(color, svg_number(el, _fill_opacity_, 1));
+                std::vector<float> xs     = numbers(el->get_attr("x", "0"));
+                std::vector<float> ys     = numbers(el->get_attr("y", "0"));
+                float              x      = xs.empty() ? 0 : xs[0];
+                float              y      = ys.empty() ? 0 : ys[0];
+                const float        em     = el->css().get_font_size().value();
+                auto               shift  = [em](const char* value) -> float {
+                    if(!value || !*value)
+                        return 0;
+                    const char* p = value;
+                    float       v = 0;
+                    if(!next_number(p, v))
+                        return 0;
+                    return (p[0] == 'e' && p[1] == 'm') ? v * em : v;
+                };
+                x += shift(el->get_attr("dx"));
+                y += shift(el->get_attr("dy"));
+                pixel_t            width  = m_container->text_width(collapsed.c_str(), font);
+                std::string        anchor = svg_ident(el, _text_anchor_);
+                if(anchor == "middle")
+                {
+                    x -= width.value() / 2;
+                } else if(anchor == "end")
+                {
+                    x -= width.value();
+                }
+                const auto& fm = el->css().get_font_metrics();
+                position    pos(pixel_t(x), pixel_t(y) - fm.ascent, width, fm.height);
+                if(m_hit_mode)
+                {
+                    if(hits(pos.left().value(), pos.top().value(), pos.right().value(), pos.bottom().value(), 0))
+                    {
+                        m_hit = el;
+                    }
+                    return;
+                }
+                m_container->draw_text(m_hdc, collapsed.c_str(), font, color, pos);
+#else
+                // Telegram (VENDOR.md edit 38): the text as runs. Each Text node is drawn in its own element's font and
+                // fill (the text's, a tspan's, an a's); a tspan's x and y set the position and start a new chunk, its dx
+                // and dy move it, and the move persists after it; whitespace collapses across the runs as across one
+                // string; text-anchor shifts each chunk by its width.
+                struct text_run
+                {
+                    element::ptr owner;
+                    std::string  text;
+                    float        x;
+                    float        y;
+                    float        width;
+                    bool         chunk;
+                };
+                auto shift = [](const element::ptr& owner, const char* value) -> float {
+                    if(!value || !*value)
+                        return 0;
+                    const char* p = value;
+                    float       v = 0;
+                    if(!next_number(p, v))
+                        return 0;
+                    return (p[0] == 'e' && p[1] == 'm') ? v * owner->css().get_font_size().value() : v;
+                };
+                std::vector<text_run> runs;
+                float                 x = 0, y = 0;
+                bool                  pending_space = false, any = false, chunk = true;
+                auto                  place = [&](const element::ptr& owner) {
+                    std::vector<float> xs = numbers(owner->get_attr("x", ""));
+                    std::vector<float> ys = numbers(owner->get_attr("y", ""));
+                    if(!xs.empty())
+                    {
+                        x     = xs[0];
+                        chunk = true;
+                    }
+                    if(!ys.empty())
+                        y = ys[0];
+                    x += shift(owner, owner->get_attr("dx"));
+                    y += shift(owner, owner->get_attr("dy"));
+                };
+                std::function<void(const element::ptr&, int)> walk = [&](const element::ptr& owner, int depth) {
+                    for(const auto& child : owner->children())
+                    {
+                        if(child->is_text())
+                        {
+                            std::string raw;
+                            child->get_text(raw);
+                            std::string collapsed;
+                            for(char ch : raw)
+                            {
+                                if(std::isspace(static_cast<unsigned char>(ch)))
+                                {
+                                    pending_space = any;
+                                    continue;
+                                }
+                                if(pending_space)
+                                {
+                                    collapsed += ' ';
+                                    pending_space = false;
+                                }
+                                collapsed += ch;
+                                any = true;
+                            }
+                            const uint_ptr font = owner->css().get_font();
+                            if(collapsed.empty() || !font)
+                                continue;
+                            const float width = m_container->text_width(collapsed.c_str(), font).value();
+                            runs.push_back({owner, collapsed, x, y, width, chunk});
+                            chunk = false;
+                            x += width;
+                            continue;
+                        }
+                        const std::string name = lowcase(child->get_tagName() ? child->get_tagName() : "");
+                        if(depth < 32 && (name == "tspan" || name == "a") && child->css().get_display() != display_none &&
+                           !attribute_hides(child))
+                        {
+                            place(child);
+                            walk(child, depth + 1);
+                        }
+                    }
+                };
+                place(el);
+                walk(el, 0);
+                for(size_t start = 0; start < runs.size();)
+                {
+                    size_t stop = start + 1;
+                    while(stop < runs.size() && !runs[stop].chunk)
+                        stop++;
+                    const float       width  = runs[stop - 1].x + runs[stop - 1].width - runs[start].x;
+                    const std::string anchor = svg_ident(runs[start].owner, _text_anchor_);
+                    const float       by     = anchor == "middle" ? width / 2 : anchor == "end" ? width : 0;
+                    for(size_t i = start; i < stop; i++)
+                        runs[i].x -= by;
+                    start = stop;
+                }
+                for(const text_run& run : runs)
+                {
+                    const auto& fm = run.owner->css().get_font_metrics();
+                    position    pos(pixel_t(run.x), pixel_t(run.y) - fm.ascent, pixel_t(run.width), fm.height);
                     if(m_hit_mode)
                     {
                         if(hits(pos.left().value(), pos.top().value(), pos.right().value(), pos.bottom().value(), 0))
-                        {
-                            m_hit = el;
-                        }
+                            m_hit = run.owner;
                         continue;
                     }
                     web_color color;
-                    if(!svg_paint(run.style, _fill_, web_color::black, true, color, m_container))
-                    {
+                    if(!svg_paint(run.owner, _fill_, web_color::black, true, color, m_container))
                         continue;
-                    }
-                    color = with_opacity(color, svg_number(run.style, _fill_opacity_, 1));
-                    m_container->draw_text(m_hdc, run.text.c_str(), run.style->css().get_font(), color, pos);
+                    color = with_opacity(color, svg_number(run.owner, _fill_opacity_, 1));
+                    m_container->draw_text(m_hdc, run.text.c_str(), run.owner->css().get_font(), color, pos);
                 }
+#endif
+            }
+
+            // Telegram (VENDOR.md edit 38): the element a <use> refers to by its href (or xlink:href) fragment, the first
+            // in the document with that id; nullptr for anything else.
+            element::ptr use_target(const element::ptr& use)
+            {
+                const char* href = use->get_attr("href");
+                if(!href || !*href)
+                    href = use->get_attr("xlink:href");
+                if(!href || href[0] != '#' || !href[1])
+                    return nullptr;
+                const document* doc = use->doc_ptr();
+                return doc ? doc->svg_element_by_id(href + 1) : nullptr;
+            }
+
+            // Telegram (VENDOR.md edit 38): draws a <use>'s instance: its target translated by x and y, a symbol (or svg)
+            // in a viewport of the use's width and height (else the target's, else 100%) mapped from its viewBox by its
+            // preserveAspectRatio (xMidYMid meet), with no clip. A target that is the use, one of its ancestors or an
+            // instance being drawn is refused, as is anything past kMaxUseDepth nested instances or the paint's share of
+            // the document's kMaxUseElements; a hit inside an instance is the outermost use.
+            void draw_use(const element::ptr& use, int visibility, int depth)
+            {
+                if(m_use_stack.size() >= kMaxUseDepth || m_use_elements <= 0)
+                    return;
+                const element::ptr target = use_target(use);
+                if(!target)
+                    return;
+                for(element::ptr ancestor = use; ancestor; ancestor = ancestor->parent())
+                {
+                    if(ancestor == target)
+                        return;
+                }
+                if(std::find(m_use_stack.begin(), m_use_stack.end(), target.get()) != m_use_stack.end())
+                    return;
+                const std::string tag      = lowcase(target->get_tagName() ? target->get_tagName() : "");
+                const bool        viewport = tag == "symbol" || tag == "svg";
+                float             saved_view[4];
+                std::copy(m_view, m_view + 4, saved_view);
+                transform_matrix matrix{1, 0, 0, 1, attr_length(use, "x", m_view[2], 0), attr_length(use, "y", m_view[3], 0)};
+                if(viewport)
+                {
+                    float w = attr_length(use, "width", m_view[2], -1);
+                    float h = attr_length(use, "height", m_view[3], -1);
+                    if(w < 0)
+                        w = attr_length(target, "width", m_view[2], -1);
+                    if(h < 0)
+                        h = attr_length(target, "height", m_view[3], -1);
+                    if(w < 0)
+                        w = m_view[2];
+                    if(h < 0)
+                        h = m_view[3];
+                    if(!(w > 0) || !(h > 0))
+                        return;
+                    float              view[4] = {0, 0, w, h};
+                    std::vector<float> box     = numbers(target->get_attr("viewbox"));
+                    const bool         has_box = box.size() == 4 && box[2] > 0 && box[3] > 0;
+                    if(has_box)
+                        std::copy(box.begin(), box.end(), view);
+                    float             sx = w / view[2], sy = h / view[3], tx = 0, ty = 0;
+                    const std::string aspect = lowcase(target->get_attr("preserveaspectratio", ""));
+                    if(has_box && aspect.find("none") == std::string::npos)
+                    {
+                        const float s  = aspect.find("slice") != std::string::npos ? std::max(sx, sy) : std::min(sx, sy);
+                        const float fx = aspect.find("xmin") != std::string::npos ? 0 : aspect.find("xmax") != std::string::npos ? 1 : 0.5f;
+                        const float fy = aspect.find("ymin") != std::string::npos ? 0 : aspect.find("ymax") != std::string::npos ? 1 : 0.5f;
+                        tx = (w - view[2] * s) * fx;
+                        ty = (h - view[3] * s) * fy;
+                        sx = sy = s;
+                    }
+                    matrix = transform_matrix{sx, 0, 0, sy, tx - view[0] * sx, ty - view[1] * sy}.then(matrix);
+                    std::copy(view, view + 4, m_view);
+                }
+                const transform_matrix saved   = m_matrix;
+                const element::ptr     hit     = m_hit;
+                const bool             grouped = !m_hit_mode && !matrix.is_identity();
+                if(m_hit_mode)
+                    m_matrix = matrix.then(m_matrix);
+                if(grouped)
+                {
+                    paint_group group;
+                    group.matrix = matrix;
+                    group.bounds = position(-100000, -100000, 200000, 200000);
+                    m_container->begin_group(m_hdc, group);
+                }
+                m_use_stack.push_back(target.get());
+                {
+                    const use_instance_scope instance(target.get(), use); // edit 58
+                    if(viewport)
+                        draw_children(target, visibility, depth + 1);
+                    else if(const element::ptr parent = target->parent())
+                        draw_children(parent, visibility, depth + 1, target);
+                }
+                m_use_stack.pop_back();
+                if(grouped)
+                    m_container->end_group(m_hdc);
+                if(m_hit_mode && m_hit != hit)
+                    m_hit = use;
+                m_matrix = saved;
+                std::copy(saved_view, saved_view + 4, m_view);
             }
 
           public:
@@ -1107,74 +1354,34 @@ namespace litehtml
                 return v == "none";
             }
 
+#if 0
             void draw_children(const element::ptr& el, int inherited = -1, int depth = 0)
+#else
+            // Telegram (VENDOR.md edit 38): `only`, when set, is the one child drawn (a <use>'s target).
+            void draw_children(const element::ptr& el, int inherited = -1, int depth = 0, const element::ptr& only = nullptr)
+#endif
             {
+                float diag = std::sqrt((m_view[2] * m_view[2] + m_view[3] * m_view[3]) / 2);
+#if 0
                 for(const auto& child : el->children())
+#else
+                // Telegram (VENDOR.md edit 38): a <use>'s target alone, not a walk over its siblings.
+                const elements_list only_list = only ? elements_list{only} : elements_list{};
+                for(const auto& child : only ? only_list : el->children())
+#endif
                 {
-                    draw_child(child, inherited, depth);
-                }
-            }
-
-            // <use>: the element it names, moved to x, y; a <symbol> has its view box fitted into width × height.
-            void draw_use(const element::ptr& use, int visibility, int depth)
-            {
-                const char* href = use->get_attr("href");
-                if(!href)
-                    href = use->get_attr("xlink:href");
-                if(!href || href[0] != '#' || !href[1] || depth > 8 || m_use_elements <= 0)
-                    return;
-                // Telegram (VENDOR.md edit 38): looked up in the document's id map, not by a selector built from the
-                // href (a selector parse per instance, and an id that is not an identifier would not parse).
-                const element::ptr target = use->get_document()->svg_element_by_id(href + 1);
-                if(!target)
-                    return;
-                for(element::ptr p = use; p; p = p->parent())
-                {
-                    if(p == target)
-                        return;
-                }
-                transform_matrix m{1, 0, 0, 1, attr_length(use, "x", m_view[2], 0), attr_length(use, "y", m_view[3], 0)};
-                const bool symbol = lowcase(target->get_tagName() ? target->get_tagName() : "") == "symbol";
-                std::vector<float> box = numbers(target->get_attr("viewbox"));
-                if(symbol && box.size() == 4 && box[2] > 0 && box[3] > 0)
-                {
-                    const float w = attr_length(use, "width", m_view[2], m_view[2]), h = attr_length(use, "height", m_view[3], m_view[3]);
-                    const float s = std::min(w / box[2], h / box[3]);
-                    m = transform_matrix{s, 0, 0, s, -box[0] * s + (w - box[2] * s) / 2, -box[1] * s + (h - box[3] * s) / 2}.then(m);
-                }
-                const transform_matrix saved = m_matrix;
-                if(m_hit_mode)
-                {
-                    m_matrix = m.then(m_matrix);
-                } else
-                {
-                    paint_group group;
-                    group.matrix = m;
-                    group.bounds = position(-100000, -100000, 200000, 200000);
-                    m_container->begin_group(m_hdc, group);
-                }
-                {
-                    use_host_scope host(target, use);
-                    if(symbol)
-                        draw_children(target, visibility, depth + 1);
-                    else
-                        draw_child(target, visibility, depth + 1);
-                }
-                if(!m_hit_mode)
-                    m_container->end_group(m_hdc);
-                m_matrix = saved;
-            }
-
-            void draw_child(const element::ptr& child, int inherited, int depth)
-            {
-                const float diag = std::sqrt((m_view[2] * m_view[2] + m_view[3] * m_view[3]) / 2);
-                // Telegram (VENDOR.md edit 38): every element drawn inside an instance spends the document's budget.
-                if(depth > 0 && --m_use_elements < 0)
-                    return;
-                {
-                    if(child->is_text() || child->css().get_display() == display_none || attribute_hides(child))
+                    // Telegram (VENDOR.md edit 38).
+                    if(only && child != only)
+                    {
+                        continue;
+                    }
+                    if(!m_use_stack.empty() && --m_use_elements < 0)
                     {
                         return;
+                    }
+                    if(child->is_text() || child->css().get_display() == display_none || attribute_hides(child))
+                    {
+                        continue;
                     }
                     int visibility = attribute_visibility(child);
                     if(visibility < 0)
@@ -1186,7 +1393,7 @@ namespace litehtml
                     if(is_one_of(name, "defs", "style", "title", "desc", "lineargradient", "radialgradient",
                                  "clippath", "mask", "pattern", "symbol", "marker", "filter", "script", "metadata"))
                     {
-                        return;
+                        continue;
                     }
                     float opacity = child->css().get_opacity();
                     if(const char* attr = child->get_attr("opacity"))
@@ -1195,9 +1402,7 @@ namespace litehtml
                     }
                     paint_group group;
                     const auto tag = std::dynamic_pointer_cast<html_tag>(child);
-                    group.matrix = tag && tag->has_own_property(_transform_)
-                        ? svg_css_transform(child, position(pixel_t(m_view[0]), pixel_t(m_view[1]), pixel_t(m_view[2]), pixel_t(m_view[3])))
-                        : parse_svg_transform(child->get_attr("transform"));
+                    group.matrix = element_transform(child, m_view);
                     group.opacity = opacity;
                     group.bounds  = position(-100000, -100000, 200000, 200000);
                     bool grouped  = opacity < 1 || !group.matrix.is_identity();
@@ -1232,6 +1437,9 @@ namespace litehtml
                         if(!cached) draw_children(child, visibility, depth + 1);
                     } else if(hidden)
                     {
+                    } else if(name == "use") // Telegram (VENDOR.md edit 38)
+                    {
+                        draw_use(child, visibility, depth);
                     } else if(name == "circle")
                     {
                         float r = attr_length(child, "r", diag, 0);
@@ -1297,9 +1505,6 @@ namespace litehtml
                     } else if(name == "text")
                     {
                         draw_text(child);
-                    } else if(name == "use")
-                    {
-                        draw_use(child, visibility, depth);
                     }
                     if(grouped)
                     {
@@ -1314,6 +1519,12 @@ namespace litehtml
     bool svg_paint_color(const element::ptr& el, bool fill, web_color& out, document_container* container)
     {
         return svg_paint(el, fill ? _fill_ : _stroke_, web_color::black, fill, out, container);
+    }
+
+    // Telegram (VENDOR.md edit 30.2).
+    css_token_vector svg_computed_property(const element::ptr& el, string_id name)
+    {
+        return svg_property(el, name, true);
     }
 
     bool svg_geometry(const element::ptr& el, vector_path& path)
@@ -1652,19 +1863,10 @@ namespace litehtml
                     view[2]              = w.empty() ? 0 : w[0];
                     view[3]              = h.empty() ? 0 : h[0];
                 }
-                const auto     tag      = std::dynamic_pointer_cast<html_tag>(el);
-                const position view_box = position(pixel_t(view[0]), pixel_t(view[1]), pixel_t(view[2]), pixel_t(view[3]));
-                return tag && tag->has_own_property(_transform_) ? svg_css_transform(el, view_box)
-                                                                 : parse_svg_transform(el->get_attr("transform"));
+                return element_transform(el, view);
             }
         }
         return transform_matrix();
-    }
-
-    // Telegram (VENDOR.md edit 30.2): an SVG property as the painter resolves it, for getComputedStyle.
-    css_token_vector svg_computed_property(const element::ptr& el, string_id name)
-    {
-        return svg_property(el, name, true);
     }
 
     float svg_path_length(const vector_path& path, float at, float* outx, float* outy)
@@ -1753,14 +1955,6 @@ namespace litehtml
         return total;
     }
 
-    el_svg::el_svg(const document::ptr& doc) :
-        html_tag(doc)
-    {
-        if(doc)
-            doc->note_svg();
-        m_css.set_display(display_inline_block);
-    }
-
     // Telegram (VENDOR.md edit 38): the document's ids for <use>, the first element with an id winning, gathered again
     // when the match epoch (every attribute and structure patch moves it) or the paint generation has moved.
     element::ptr document::svg_element_by_id(const std::string& id) const
@@ -1810,6 +2004,14 @@ namespace litehtml
         if(doc)
             doc->use_instanced() += spent - m_use_instanced;
         m_use_instanced = spent;
+    }
+
+    el_svg::el_svg(const document::ptr& doc) :
+        html_tag(doc)
+    {
+        if(doc)
+            doc->note_svg();
+        m_css.set_display(display_inline_block);
     }
 
     bool el_svg::is_replaced() const
@@ -1912,7 +2114,7 @@ namespace litehtml
         float       view[4];
         view_group(pos, view, group);
         svg_painter painter(doc_ptr()->container(), view, group.matrix, x.value(), y.value());
-        painter.set_use_budget(use_budget()); // Telegram (VENDOR.md edit 38)
+        painter.set_use_budget(use_budget());   // Telegram (VENDOR.md edit 38)
         painter.draw_children(shared_from_this());
         return painter.hit();
     }
@@ -1926,12 +2128,16 @@ namespace litehtml
         view_group(pos, view, group);
         auto container = doc_ptr()->container();
         container->begin_group(hdc, group);
+#if 0
+        svg_painter(container, hdc, view).draw_children(shared_from_this());
+#else
         // Telegram (VENDOR.md edit 38).
         svg_painter painter(container, hdc, view);
         const int   budget = use_budget();
         painter.set_use_budget(budget);
         painter.draw_children(shared_from_this());
         note_use_drawn(budget, painter.use_budget_left());
+#endif
         container->end_group(hdc);
         return true;
     }
@@ -1962,6 +2168,13 @@ namespace litehtml
         container->set_clip(pos, no_radius);
         const position cache_bounds(pixel_t((pos.x.value() - group.matrix.tx) / sx), pixel_t((pos.y.value() - group.matrix.ty) / sy),
                                     pixel_t(pos.width.value() / sx), pixel_t(pos.height.value() / sy));
+#if 0
+        auto paint = [&](uint_ptr target) {
+            container->begin_group(target, group);
+            svg_painter(container, target, view, m_group_cache_eligible ? &cache_bounds : nullptr).draw_children(shared_from_this());
+            container->end_group(target);
+        };
+#else
         // Telegram (VENDOR.md edit 38): the paint draws within this svg's share of the document's instance budget.
         const int budget = use_budget();
         auto      paint  = [&](uint_ptr target) {
@@ -1972,6 +2185,7 @@ namespace litehtml
             note_use_drawn(budget, painter.use_budget_left());
             container->end_group(target);
         };
+#endif
         uint64_t key    = 0;
         bool     cached = false;
         if(cached_paint_key(key))

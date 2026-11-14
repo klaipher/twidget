@@ -1893,17 +1893,19 @@ static CTFontRef CreateFeatureFont(CTFontRef base, const std::string& features)
     return font ? font : (CTFontRef)CFRetain(base);
 }
 
-static std::shared_ptr<SharedFont> AcquireSharedFont(const lh::font_description& descr, CGFloat size)
+static std::shared_ptr<SharedFont> AcquireSharedFont(const lh::font_description& descr, CGFloat size,
+                                                     const std::string& features)
 {
     bool        italic = descr.style == lh::font_style_italic;
     std::string key    = descr.family + "|" + std::to_string(size) + "|" + std::to_string(descr.weight) + "|" +
                       (italic ? "1" : "0");
     if(descr.letter_spacing != 0)
         key += "|" + std::to_string(descr.letter_spacing);
-    if(descr.word_spacing != 0)
-        key += "|w" + std::to_string(descr.word_spacing);
-    if(!descr.features.empty())
-        key += "|f" + descr.features;
+    // Merge with upstream 13.2: font_description keeps only tabular_nums of the font features, so the full list
+    // (font-variant-numeric and font-feature-settings merged) comes beside it; word-spacing is added by litehtml to
+    // each space's width, so the container no longer applies it.
+    if(!features.empty())
+        key += "|f" + features;
 
     {
         std::lock_guard<std::mutex> lock(gFontCacheMutex);
@@ -1920,12 +1922,12 @@ static std::shared_ptr<SharedFont> AcquireSharedFont(const lh::font_description&
 
     auto sf            = std::make_shared<SharedFont>();
 #if TARGET_OS_OSX
-    sf->font           = descr.features.empty() ? (CTFontRef)CFBridgingRetain(nsfont) : CreateFeatureFont((__bridge CTFontRef)nsfont, descr.features);
+    sf->font           = features.empty() ? (CTFontRef)CFBridgingRetain(nsfont) : CreateFeatureFont((__bridge CTFontRef)nsfont, features);
 #else
     sf->font           = resolved;
-    if(!descr.features.empty())
+    if(!features.empty())
     {
-        CTFontRef featured = CreateFeatureFont(resolved, descr.features);
+        CTFontRef featured = CreateFeatureFont(resolved, features);
         CFRelease(resolved);
         sf->font = featured;
     }
@@ -1941,12 +1943,7 @@ static std::shared_ptr<SharedFont> AcquireSharedFont(const lh::font_description&
     sf->drawAttrs = CFDictionaryCreate(nullptr, drawKeys, drawVals, sf->kern != 0 ? 3 : 2, &kCFTypeDictionaryKeyCallBacks,
                                        &kCFTypeDictionaryValueCallBacks);
     CFRelease(kern);
-    if(descr.word_spacing != 0)
-    {
-        CGFloat spaceKern = sf->kern + descr.word_spacing;
-        sf->spaceKern     = CFNumberCreate(nullptr, kCFNumberCGFloatType, &spaceKern);
-    }
-    sf->simple = std::make_unique<LHSimpleShaper>(sf->font, sf->drawAttrs, descr.word_spacing);
+    sf->simple = std::make_unique<LHSimpleShaper>(sf->font, sf->drawAttrs, 0);
     sf->colorGlyphs = (CTFontGetSymbolicTraits(sf->font) & kCTFontTraitColorGlyphs) != 0;
 
     CGFloat ascent          = CTFontGetAscent(sf->font);
@@ -1977,10 +1974,16 @@ static std::shared_ptr<SharedFont> AcquireSharedFont(const lh::font_description&
 lh::uint_ptr LHContainer::create_font(const lh::font_description& descr, const lh::document* doc,
                                       lh::font_metrics* fm)
 {
+    return create_font(descr, descr.tabular_nums ? std::string("tnum=1") : std::string(), doc, fm);
+}
+
+lh::uint_ptr LHContainer::create_font(const lh::font_description& descr, const std::string& features,
+                                      const lh::document* doc, lh::font_metrics* fm)
+{
     CGFloat size = std::max<CGFloat>(F(descr.size), 1.0);
 
     auto* f   = new Font();
-    f->shared = AcquireSharedFont(descr, size);
+    f->shared = AcquireSharedFont(descr, size, features);
 
     f->underline  = (descr.decoration_line & lh::text_decoration_line_underline) != 0;
     f->overline   = (descr.decoration_line & lh::text_decoration_line_overline) != 0;
@@ -4668,7 +4671,7 @@ static CGPathRef CreateVectorPath(const lh::vector_path& path)
     return out;
 }
 
-void LHContainer::capture_shape(const lh::vector_path& path)
+void LHContainer::capture_shape(const lh::vector_path& path, bool stroke_gradient)
 {
     if(!path.fill && !path.stroke)
         return;
@@ -4680,7 +4683,7 @@ void LHContainer::capture_shape(const lh::vector_path& path)
     for(const auto& g : m_groups)
         faded = faded || g.opacity < 1;
     if(dashed || faded || !m_clips.empty() || !m_effects.empty() || m_hidden_depth > 0 || std::fabs(m.b) > 1e-9 || std::fabs(m.c) > 1e-9 ||
-       std::fabs(std::fabs(m.a) - std::fabs(m.d)) > 1e-6 || (path.fill && path.fill_gradient.type == 2) || (path.stroke && path.stroke_gradient.type != 0))
+       std::fabs(std::fabs(m.a) - std::fabs(m.d)) > 1e-6 || (path.fill && path.fill_gradient.type == 2) || (path.stroke && stroke_gradient))
     {
         m_shapes_bad = true;
         return;
@@ -4752,8 +4755,21 @@ static void ReleaseSVGGradient(void* info)
 
 void LHContainer::draw_path(lh::uint_ptr hdc, const lh::vector_path& path)
 {
+    draw_path_with_stroke(hdc, path, nullptr);
+}
+
+// Merge with upstream 13.2: vector_path has no stroke_gradient field; el_svg hands it over separately.
+void LHContainer::draw_path_stroke_gradient(lh::uint_ptr hdc, const lh::vector_path& path, const lh::svg_gradient& stroke)
+{
+    draw_path_with_stroke(hdc, path, &stroke);
+}
+
+void LHContainer::draw_path_with_stroke(lh::uint_ptr hdc, const lh::vector_path& path, const lh::svg_gradient* stroke_gradient)
+{
     if(lh::g_paint_trace)
         return;
+    const lh::svg_gradient no_gradient;
+    const lh::svg_gradient& stroke_grad = stroke_gradient ? *stroke_gradient : no_gradient;
     flush_text();
     if(m_painter)
     {
@@ -4762,7 +4778,7 @@ void LHContainer::draw_path(lh::uint_ptr hdc, const lh::vector_path& path)
     }
     if(m_shapes)
     {
-        capture_shape(path);
+        capture_shape(path, stroke_grad.type != 0);
         return;
     }
     if(m_runs || (!path.fill && !path.stroke))
@@ -4795,7 +4811,7 @@ void LHContainer::draw_path(lh::uint_ptr hdc, const lh::vector_path& path)
         for(float v : path.dashes)
             hash.number(v);
         hash.number(path.dash_offset);
-        for(const auto* gradient : {&path.fill_gradient, &path.stroke_gradient})
+        for(const auto* gradient : {&path.fill_gradient, &stroke_grad})
         {
             const auto& g = *gradient;
             hash.integer(g.type);
@@ -4895,7 +4911,7 @@ void LHContainer::draw_path(lh::uint_ptr hdc, const lh::vector_path& path)
         else
             CGContextFillPath(ctx);
     }
-    if(path.stroke && (path.stroke_gradient.type != 0 || path.stroke_color.alpha > 0))
+    if(path.stroke && (stroke_grad.type != 0 || path.stroke_color.alpha > 0))
     {
         SetStroke(ctx, path.stroke_color);
         CGContextSetLineWidth(ctx, path.stroke_width);
@@ -4911,11 +4927,11 @@ void LHContainer::draw_path(lh::uint_ptr hdc, const lh::vector_path& path)
             CGContextSetLineDash(ctx, path.dash_offset, lengths.data(), lengths.size());
         }
         CGContextAddPath(ctx, cgpath);
-        if(path.stroke_gradient.type != 0)
+        if(stroke_grad.type != 0)
         {
             CGContextReplacePathWithStrokedPath(ctx);
             TWClipPath(ctx, false);
-            draw_gradient(path.stroke_gradient);
+            draw_gradient(stroke_grad);
         } else
         {
             CGContextStrokePath(ctx);

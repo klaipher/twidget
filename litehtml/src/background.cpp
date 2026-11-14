@@ -892,6 +892,11 @@ namespace litehtml
     // normalize length into value between 0 and 1
     float normalize_length(css_length length, float line_len)
     {
+        // Telegram (VENDOR.md edit 48): a calc stop at the line's length.
+        if(length.is_calc())
+        {
+            return pixel_t(line_len) != 0_px ? float(length.calc_percent(pixel_t(line_len))) / line_len : 0.0f;
+        }
         if(length.units() == css_units_percentage)
         {
             return length.val() / 100.0f;
@@ -915,9 +920,107 @@ namespace litehtml
         {
             repeating = true;
         }
-        // Which positions the stylesheet gave: an explicit 0 is a position, not a missing one.
-        std::vector<bool> given;
+#if 0
+        int  none_units      = 0;
+        bool has_transparent = false;
+        for(const auto& item : colors)
+        {
+            if(item.is_color_hint)
+            {
+                if(!color_points.empty())
+                {
+                    color_points.back().hint =
+                        item.length ? normalize_length(*item.length, line_len) : *item.angle / 360;
+                }
+                continue;
+            }
+            if(item.color.alpha == 0)
+            {
+                has_transparent = true;
+            }
+            if(item.length)
+            {
+                color_points.emplace_back(normalize_length(*item.length, line_len), item.color);
+            } else if(item.angle)
+            {
+                color_points.emplace_back(*item.angle / 360, item.color);
+            } else
+            {
+                if(!color_points.empty())
+                {
+                    none_units++;
+                }
+                color_points.emplace_back(0.0f, item.color);
+            }
+        }
+        if(color_points.empty())
+        {
+            return false;
+        }
+
+        if(!repeating)
+        {
+            // Add color point with offset 0 if not exists
+            if(pixel_t(color_points[0].offset) != 0_px)
+            {
+                color_points.emplace(color_points.begin(), 0.0f, color_points[0].color);
+            }
+            // Add color point with offset 1.0 if not exists
+            if(pixel_t(color_points.back().offset) < 1_px)
+            {
+                if(pixel_t(color_points.back().offset) == 0_px)
+                {
+                    color_points.back().offset = 1;
+                    none_units--;
+                } else
+                {
+                    color_points.emplace_back(1.0f, color_points.back().color);
+                }
+            }
+        } else
+        {
+            // Add color point with offset 1.0 if not exists
+            if(pixel_t(color_points.back().offset) == 0_px)
+            {
+                color_points.back().offset = 1;
+                none_units--;
+            }
+        }
+
+        if(none_units > 0)
+        {
+            size_t i = 1;
+            while(i < color_points.size())
+            {
+                if(pixel_t(color_points[i].offset) != 0_px)
+                {
+                    i++;
+                    continue;
+                }
+                // Find next defined offset
+                size_t j = i + 1;
+                while(pixel_t(color_points[j].offset) == 0_px)
+                {
+                    j++;
+                }
+                size_t num    = j - i;
+                float  sum    = color_points[i - 1].offset + color_points[j].offset;
+                float  offset = sum / static_cast<float>(num + 1);
+                while(i < j)
+                {
+                    color_points[i].offset = color_points[i - 1].offset + offset;
+                    i++;
+                }
+            }
+        }
+
+#else
+        // Telegram (VENDOR.md edit 35): CSS Images 3 §3.4.3's colour-stop fix-up. A stop with no position stays unplaced
+        // until the first and last get 0 and 1; each position below an earlier one is raised to the largest before it;
+        // the unplaced are spaced evenly between their placed neighbours; only then do a non-repeating gradient's
+        // implicit ends join.
         bool              has_transparent = false;
+        std::vector<bool> placed;
         for(const auto& item : colors)
         {
             if(item.is_color_hint)
@@ -943,29 +1046,26 @@ namespace litehtml
             {
                 color_points.emplace_back(0.0f, item.color);
             }
-            given.push_back(item.length || item.angle);
+            placed.push_back(item.length || item.angle);
         }
         if(color_points.empty())
         {
             return false;
         }
-
-        // https://drafts.csswg.org/css-images-4/#color-stop-fixup: the first stop defaults to 0 and the last to
-        // 100%, a position before a larger one moves up to it, and the stops between two positions share the gap.
-        if(!given.front())
+        if(!placed.front())
         {
             color_points.front().offset = 0;
-            given.front()               = true;
+            placed.front()              = true;
         }
-        if(!given.back())
+        if(!placed.back())
         {
             color_points.back().offset = 1;
-            given.back()               = true;
+            placed.back()              = true;
         }
         float largest = color_points.front().offset;
         for(size_t i = 0; i < color_points.size(); i++)
         {
-            if(given[i])
+            if(placed[i])
             {
                 color_points[i].offset = std::max(color_points[i].offset, largest);
                 largest                = color_points[i].offset;
@@ -973,27 +1073,31 @@ namespace litehtml
         }
         for(size_t i = 1; i < color_points.size(); i++)
         {
-            if(given[i])
+            if(placed[i])
                 continue;
             size_t j = i;
-            while(!given[j])
+            while(!placed[j])
                 j++;
-            const float from = color_points[i - 1].offset, to = color_points[j].offset;
+            const float from = color_points[i - 1].offset;
+            const float step = (color_points[j].offset - from) / static_cast<float>(j - i + 1);
             for(size_t k = i; k < j; k++)
-                color_points[k].offset = from + (to - from) * static_cast<float>(k - i + 1) / static_cast<float>(j - i + 1);
+                color_points[k].offset = from + step * static_cast<float>(k - i + 1);
             i = j;
         }
         if(!repeating)
         {
             if(color_points.front().offset > 0)
             {
-                color_points.emplace(color_points.begin(), 0.0f, color_points.front().color);
+                const web_color first = color_points.front().color;
+                color_points.emplace(color_points.begin(), 0.0f, first);
             }
             if(color_points.back().offset < 1)
             {
-                color_points.emplace_back(1.0f, color_points.back().color);
+                const web_color last = color_points.back().color;
+                color_points.emplace_back(1.0f, last);
             }
         }
+#endif
 
         // process transparent
         if(has_transparent)

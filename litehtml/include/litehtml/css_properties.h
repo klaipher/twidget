@@ -35,13 +35,11 @@ namespace litehtml
       private:
         element_position      m_el_position    = element_position_static;
         text_align            m_text_align     = text_align_start;
-        direction             m_direction      = direction_ltr;
         overflow              m_overflow       = overflow_visible;
         overflow              m_overflow_x     = overflow_visible;
         overflow              m_overflow_y     = overflow_visible;
         white_space           m_white_space    = white_space_normal;
         overflow_wrap         m_overflow_wrap  = overflow_wrap_normal;
-        word_break            m_word_break     = word_break_normal;
         user_select           m_user_select    = user_select_auto;
         style_display         m_display        = display_inline;
         visibility            m_visibility     = visibility_visible;
@@ -127,10 +125,14 @@ namespace litehtml
         float             m_aspect_ratio = 0;
         bool              m_center_content = false;
         css_length        m_letter_spacing;
-        css_length        m_word_spacing;
-        std::string       m_font_variant_numeric;
+        std::string       m_font_variant_numeric; // Telegram: inherited like font-variant; see compute_font
+        // Telegram (VENDOR.md edit 32): inherited, each.
         std::string       m_font_feature_settings;
-        // Telegram (VENDOR.md edit 32.4): inherited.
+        std::string       m_font_features; // Nanogram fork: both merged (`tnum=1,zero=1`), handed to the host with the font
+        css_length        m_word_spacing;
+        int               m_word_break = 0;
+        // Telegram (VENDOR.md edit 46): inherited.
+        int               m_direction = 0;
         std::string       m_quotes;
         box_shadow_vector m_text_shadows;
         box_shadow_vector m_box_shadows;
@@ -138,10 +140,16 @@ namespace litehtml
         filter_vector     m_backdrop_filter;
         clip_path_shape   m_clip_path;
         transform_vector  m_transform;
+        size_t            m_transform_individual = 0; // Telegram (VENDOR.md edit 34)
+        // Telegram (VENDOR.md edit 37): not inherited.
+        int               m_object_fit = 0;
+        int               m_text_overflow = 0; // Telegram (VENDOR.md edit 40): not inherited
+        css_length        m_object_position_x = css_length(50, css_units_percentage);
+        css_length        m_object_position_y = css_length(50, css_units_percentage);
         css_length        m_transform_origin_x = css_length(50, css_units_percentage);
         css_length        m_transform_origin_y = css_length(50, css_units_percentage);
-        bool              m_transform_fill_box = false;
         int               m_backface_hidden    = 0;
+        int               m_transform_box      = transform_box_view_box; // Telegram (VENDOR.md edit 72)
         int               m_contain            = 0;
         css_border        m_outline;
         css_length        m_outline_offset;
@@ -174,6 +182,7 @@ namespace litehtml
         void       set_text_align(text_align mTextAlign);
 
         overflow get_overflow() const;
+        // Telegram (VENDOR.md edit 23): each axis, for getComputedStyle (get_overflow is the merged value).
         overflow get_overflow_x() const { return m_overflow_x; }
         overflow get_overflow_y() const { return m_overflow_y; }
         void     set_overflow(overflow mOverflow);
@@ -184,13 +193,11 @@ namespace litehtml
         /// Not inherited: `auto` follows the parent's, as in browsers.
         user_select get_user_select() const { return m_user_select; }
         void set_overflow_wrap(overflow_wrap value) { m_overflow_wrap = value; }
-        word_break get_word_break() const { return m_word_break; }
         void set_word_break(word_break value) { m_word_break = value; }
         /// How text may break inside words: word-break's break-all and break-word break anywhere too.
-        direction get_direction() const { return m_direction; }
         overflow_wrap get_wrapping() const
         {
-            return m_word_break == word_break_break_all || m_word_break == word_break_break_word ? overflow_wrap_anywhere : m_overflow_wrap;
+            return get_word_break() == word_break_break_all || get_word_break() == word_break_break_word ? overflow_wrap_anywhere : m_overflow_wrap;
         }
 
         style_display get_display() const;
@@ -285,6 +292,7 @@ namespace litehtml
         void    set_font_size(pixel_t mFontSize);
 
         uint_ptr get_font() const;
+        const std::string& get_font_features() const { return m_font_features; } // Nanogram fork
         const std::string& font_family() const { return m_font_family; }
         const css_length&  font_weight() const { return m_font_weight; }
         font_style         font_style_value() const { return m_font_style; }
@@ -350,7 +358,7 @@ namespace litehtml
             m_filter.clear();
             m_backdrop_filter.clear();
             m_box_shadows.erase(std::remove_if(m_box_shadows.begin(), m_box_shadows.end(), [](const box_shadow& shadow) {
-                return shadow.blur.val() > 0 || shadow.blur.units() == css_units_calc;
+                return shadow.blur.val() > 0 || shadow.blur.is_calc();
             }), m_box_shadows.end());
         }
         float                    get_aspect_ratio() const { return m_aspect_ratio; }
@@ -363,8 +371,11 @@ namespace litehtml
             m_flex_align_items     = align;
         }
         pixel_t                  get_letter_spacing() const { return pixel_t(m_letter_spacing.val()); }
+        // Telegram (VENDOR.md edit 32).
         pixel_t                  get_word_spacing() const { return pixel_t(m_word_spacing.val()); }
-        // Telegram (VENDOR.md edit 32.4).
+        word_break               get_word_break() const { return static_cast<word_break>(m_word_break); }
+        // Telegram (VENDOR.md edit 46).
+        direction                get_direction() const { return static_cast<direction>(m_direction); }
         const std::string&       get_quotes() const { return m_quotes; }
         const box_shadow_vector& get_box_shadows() const { return m_box_shadows; }
         const filter_vector&     get_filter() const { return m_filter; }
@@ -372,10 +383,18 @@ namespace litehtml
         const box_shadow_vector& get_text_shadows() const { return m_text_shadows; }
         const clip_path_shape& get_clip_path() const { return m_clip_path; }
         const transform_vector&  get_transform() const { return m_transform; }
+        // Telegram (VENDOR.md edit 34): how many of get_transform()'s functions the translate, rotate and scale
+        // properties put before the transform property's own.
+        size_t                   get_transform_individual_count() const { return m_transform_individual; }
+        // Telegram (VENDOR.md edit 37).
+        object_fit               get_object_fit() const { return static_cast<object_fit>(m_object_fit); }
+        text_overflow            get_text_overflow() const { return static_cast<text_overflow>(m_text_overflow); }
+        const css_length&        get_object_position_x() const { return m_object_position_x; }
+        const css_length&        get_object_position_y() const { return m_object_position_y; }
         const css_length&        get_transform_origin_x() const { return m_transform_origin_x; }
         const css_length&        get_transform_origin_y() const { return m_transform_origin_y; }
-        bool                     get_transform_fill_box() const { return m_transform_fill_box; }
         bool                     get_backface_hidden() const { return m_backface_hidden != 0; }
+        int                      get_transform_box() const { return m_transform_box; }
         int                      get_contain() const { return m_contain; }
         bool                     contains(int flags) const { return (m_contain & flags) != 0; }
         bool                     clips_contents() const { return m_overflow > overflow_visible || (m_contain & contain_paint) != 0; }

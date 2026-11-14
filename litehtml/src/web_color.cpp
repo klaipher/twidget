@@ -84,6 +84,7 @@ namespace litehtml
         {"GreenYellow",          "#ADFF2F"         },
         {"HoneyDew",             "#F0FFF0"         },
         {"HotPink",              "#FF69B4"         },
+        // Telegram (VENDOR.md edit 31.1): CSS Color 4's IndianRed and Indigo.
         {"IndianRed",            "#CD5C5C"         },
         {"Indigo",               "#4B0082"         },
         {"Ivory",                "#FFFFF0"         },
@@ -115,7 +116,12 @@ namespace litehtml
         {"MediumAquaMarine",     "#66CDAA"         },
         {"MediumBlue",           "#0000CD"         },
         {"MediumOrchid",         "#BA55D3"         },
+#if 0
+        {"MediumPurple",         "#9370D8"         },
+#else
+        // Telegram (VENDOR.md edit 31.1): CSS Color 4's value.
         {"MediumPurple",         "#9370DB"         },
+#endif
         {"MediumSeaGreen",       "#3CB371"         },
         {"MediumSlateBlue",      "#7B68EE"         },
         {"MediumSpringGreen",    "#00FA9A"         },
@@ -136,7 +142,12 @@ namespace litehtml
         {"PaleGoldenRod",        "#EEE8AA"         },
         {"PaleGreen",            "#98FB98"         },
         {"PaleTurquoise",        "#AFEEEE"         },
+#if 0
+        {"PaleVioletRed",        "#D87093"         },
+#else
+        // Telegram (VENDOR.md edit 31.1): CSS Color 4's value.
         {"PaleVioletRed",        "#DB7093"         },
+#endif
         {"PapayaWhip",           "#FFEFD5"         },
         {"PeachPuff",            "#FFDAB9"         },
         {"Peru",                 "#CD853F"         },
@@ -144,6 +155,7 @@ namespace litehtml
         {"Plum",                 "#DDA0DD"         },
         {"PowderBlue",           "#B0E0E6"         },
         {"Purple",               "#800080"         },
+        // Telegram (VENDOR.md edit 31.1): CSS Color 4's RebeccaPurple.
         {"RebeccaPurple",        "#663399"         },
         {"Red",                  "#FF0000"         },
         {"RosyBrown",            "#BC8F8F"         },

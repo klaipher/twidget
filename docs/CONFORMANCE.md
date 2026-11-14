@@ -117,7 +117,7 @@ message-list integration and live bot delivery need their own checks.
 | `:lang()` on the nearest `lang`, `:empty` | the fork's `html_tag::select_pseudoclass` |
 | The `translate`, `rotate` and `scale` properties | the fork's `css_properties::compute_transform` |
 | `letter-spacing` and `word-spacing`, a no-break space widened inside its word too | `Container` (`spacing_units`, `spacing_words`), the fork's `font_description` |
-| `font-variant-numeric` and `font-feature-settings` as OpenType features | the fork's `font_description::features`; `Backend::create_font` |
+| `font-variant-numeric` and `font-feature-settings` as OpenType features | `css_properties::get_font_features`; `document_container::create_font` (features); `Backend::create_font` |
 | SVG: `getComputedTextLength`, text `getBBox`, a shape's or text's rect through the view box, `<use>` of a `<symbol>`, `<tspan>` with its own fill and shifts | the fork's `svg_ctm`, `svg_text_runs`, `el_svg` painter; `svg_box_of` |
 | Dashed and dotted borders and outlines, mitred corners between sides that differ; dashes and dots spaced as Chromium does, round the centre line of a rounded border | `Container::border_dash`, `draw_sides`, `dashed_ring` |
 | Computed `fill` and `stroke` inherited (through `<use>` too), `currentColor` resolved | the fork's `svg_paint_color` |
@@ -126,7 +126,7 @@ message-list integration and live bot delivery need their own checks.
 | `background-repeat` | `Container::draw_image` |
 | `object-fit`, `object-position` | the fork's `el_image::fitted` |
 | Gradient stop positions fixed up as CSS does (an explicit `0` is a position) | the fork's `prepare_color_points` |
-| `text-overflow: ellipsis` | the fork's `render_item_inline_context::apply_ellipsis` |
+| `text-overflow: ellipsis` | upstream's `render_item_inline_context::apply_ellipsis` (render-item ellipsis); the core text runs use `ellipsis_bytes` |
 | `filter` and `backdrop-filter`: blur, brightness, contrast, grayscale, hue-rotate, invert, opacity, saturate, sepia, drop-shadow | `FilterPush`, `Backdrop` in the display list; `D2DBackend::filtered` |
 | A canvas drawn from another canvas that the same batch draws later | `Renderer::apply_ops` |
 | The paint limit (v0.6.0): heavy boxes counted before every frame from the computed style and running animations, `limit` once past 16 (2 with `backdrop-filter`), then a paint without blur, filters, backdrop or transparency | `Renderer::count_paint`, `stop_paint`, `src/paint_policy.*` |

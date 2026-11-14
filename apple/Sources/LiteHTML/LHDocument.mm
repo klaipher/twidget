@@ -3132,7 +3132,7 @@ static CGRect LHElementRasterBounds(const std::shared_ptr<lh::render_item>& root
                 (el->get_attr("disabled") || const_cast<lh::html_tag *>(tag)->select("button:active"));
             bool backdrop = !css.get_backdrop_filter().empty();
             bool blurred = std::any_of(css.get_box_shadows().begin(), css.get_box_shadows().end(), [](const lh::box_shadow& shadow) {
-                return shadow.blur.val() > 0 || shadow.blur.units() == lh::css_units_calc;
+                return shadow.blur.val() > 0 || shadow.blur.is_calc();
             });
             NSMutableDictionary *declarations = [NSMutableDictionary dictionary];
             for(const auto& entry : keys)
@@ -3376,6 +3376,8 @@ static CGRect LHElementRasterBounds(const std::shared_ptr<lh::render_item>& root
     auto length = [&](const lh::css_length &l, NSString *predefined = @"none") -> NSString * {
         if(l.is_predefined())
             return predefined;
+        if(l.is_calc()) // math that waits for layout (litehtml 13.2 calc_node): no text kept, so no size
+            return px(0);
         switch(l.units())
         {
         case lh::css_units_percentage:
@@ -3388,7 +3390,6 @@ static CGRect LHElementRasterBounds(const std::shared_ptr<lh::render_item>& root
             return px(l.val() * 4 / 3);
         case lh::css_units_none:
         case lh::css_units_px:
-        case lh::css_units_calc:
             return px(l.val());
         default:
             return [NSString stringWithFormat:@"%g%s", l.val(), std::string(lh::css_units_strings[l.units()]).c_str()];

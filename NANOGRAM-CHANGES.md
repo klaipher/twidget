@@ -83,6 +83,19 @@ Ours: branch `nanogram`, used by Nanogram for iOS, macOS and Android. History: [
   `m_node_elements`, `tree_neutral_change`, `table_part`, `restylable_in_place`), a missing include in `line_box.cpp` and a
   doubled declaration in `style.cpp`. Not run: any link, test or app build.
 
+### litehtml merged with upstream Telegram-iOS 13.2 (base b5878f9)
+- What: the litehtml of Telegram-iOS 13.2 (Telegram twidget b5878f9 plus its VENDOR edits) merged into this fork's litehtml
+  (`git merge-file`, base b5878f9, then hand resolution), so iOS, macOS and Android share one litehtml again. Upstream's
+  features win where both have one: `calc_node`, text-overflow, object-fit/position, individual transforms,
+  `initial`/`unset`/`revert`, `tabular_nums`, word-spacing in space widths. The fork's features stay (see CHANGELOG).
+- What moved: the asserted structs are upstream's, so extras live beside them: font features as a string through
+  `document_container::create_font(descr, features, ...)` (iOS WidgetRuntime ignores it and keeps `tabular_nums`),
+  stroke gradients through `draw_path_stroke_gradient`, group owners through `begin_group(owner)`.
+- Known gaps: SVG text is measured by the fork's `svg_text_runs` (getBBox, getComputedTextLength) but painted by
+  upstream's painter, so the two can differ for tspan dx/dy and text-anchor. `css_effects.cpp`'s string
+  `has_viewport_units` has no caller now. tests/core_tests.cpp and tests/apple_tests.cpp were not run.
+- Not run: any build, link or test; syntax checks only.
+
 ### Build and test steps still owed
 - iOS: the combined iOS build, the 10 twidget/gumbo cc_tests, TwidgetRenderingTests, FidelityRenderTests, WidgetRuntime tests.
 - macOS: the Mac app build; apple/Tests (V030LayoutTests, CanvasSizingTests, WidgetSafeAreaTests, WidgetPaintPolicyTests).

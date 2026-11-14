@@ -35,8 +35,10 @@ namespace litehtml
         _before_, _after_,
 
         // CSS pseudo-classes
-        _root_, _empty_, _only_child_, _only_of_type_, _first_child_, _first_of_type_, _last_child_, _last_of_type_, _nth_child_,
+        _root_, _only_child_, _only_of_type_, _first_child_, _first_of_type_, _last_child_, _last_of_type_, _nth_child_,
         _nth_of_type_, _nth_last_child_, _nth_last_of_type_, _is_, _where_, _not_, _lang_, _checked_, _disabled_, _enabled_,
+        // Telegram (VENDOR.md edit 31.5): :empty
+        _empty_,
 
         _active_, _hover_,
 
@@ -82,10 +84,11 @@ namespace litehtml
         _text_decoration_thickness_, _text_emphasis_, _text_emphasis_style_, _text_emphasis_color_,
         _text_emphasis_position_,
 
-        _white_space_, _overflow_wrap_, _word_wrap_, _word_break_, _text_align_, _direction_, _vertical_align_, _color_, _width_, _height_, _min_width_, _min_height_,
+        _white_space_, _overflow_wrap_, _word_wrap_, _text_align_, _vertical_align_, _color_, _width_, _height_, _min_width_, _min_height_,
         _max_width_, _max_height_, _position_, _overflow_, _overflow_x_, _overflow_y_, _display_, _visibility_, _appearance_, _resize_, _box_sizing_,
-        _z_index_, _float_, _clear_, _text_indent_, _top_, _right_, _bottom_, _left_, _cursor_, _content_, _user_select_, __webkit_user_select_,
+        _z_index_, _float_, _clear_, _text_indent_, _top_, _right_, _bottom_, _left_, _cursor_, _content_,
         _border_collapse_, _text_transform_,
+        _font_variant_numeric_, // Telegram: font-variant-numeric (tabular-nums reaches font_description)
 
         _flex_, _flex_flow_, _flex_direction_, _flex_wrap_, _justify_content_, _align_items_, _align_content_,
         _align_self_, _flex_grow_, _flex_shrink_, _flex_basis_,
@@ -95,17 +98,26 @@ namespace litehtml
         _counter_reset_, _counter_increment_,
 
         _gap_, _row_gap_, _column_gap_, _grid_gap_, _grid_row_gap_, _grid_column_gap_,
-        _grid_, _grid_template_, _grid_template_columns_, _grid_template_rows_, _grid_auto_rows_, _grid_column_, _grid_row_,
+        _grid_, _grid_template_columns_, _grid_template_rows_, _grid_template_, _grid_auto_rows_, _grid_column_, _grid_row_,
         _grid_column_start_, _grid_column_end_, _grid_row_start_, _grid_row_end_,
         _justify_items_, _justify_self_, _place_items_, _place_self_, _place_content_,
-        _letter_spacing_, _word_spacing_, _opacity_, _clip_path_, _box_shadow_, _transform_, _translate_, _rotate_, _scale_, _transform_origin_, _transform_box_, _backface_visibility_, _contain_,
-        // Telegram (VENDOR.md edit 32.4): quotes
-        _quotes_,
+        _letter_spacing_, _opacity_, _clip_path_, _box_shadow_, _transform_, _transform_origin_, _transform_box_, _backface_visibility_, _contain_,
+        // Telegram (VENDOR.md edit 32): word-break, word-spacing, font-feature-settings, quotes
+        _word_break_, _word_spacing_, _font_feature_settings_, _quotes_,
+        // Telegram (VENDOR.md edit 34): the individual transform properties
+        _translate_, _rotate_, _scale_,
+        // Telegram (VENDOR.md edit 37): an image's object-fit and object-position
+        _object_fit_, _object_position_,
+        // Telegram (VENDOR.md edit 40): text-overflow
+        _text_overflow_,
+        // Telegram (VENDOR.md edit 45): user-select and its -webkit- alias
+        _user_select_, __webkit_user_select_,
+        // Telegram (VENDOR.md edit 46): direction
+        _direction_,
         _accent_color_, _color_scheme_, _outline_, _outline_width_, _outline_style_, _outline_color_, _outline_offset_, _inset_,
         _fill_, _fill_opacity_, _fill_rule_, _stroke_, _stroke_width_, _stroke_opacity_, _stroke_linecap_,
         _stroke_linejoin_, _stroke_miterlimit_, _stroke_dasharray_, _stroke_dashoffset_, _text_anchor_, _text_shadow_,
         _filter_, _backdrop_filter_, __webkit_backdrop_filter_, __webkit_font_smoothing_, _table_layout_,
-        _font_variant_numeric_, _font_feature_settings_,
 
         // some CSS dimensions
         _deg_, _grad_, _rad_, _turn_,
@@ -117,11 +129,11 @@ namespace litehtml
         // at-rules and their components
         _charset_, _layer_, _supports_, _import_, _media_, _and_, _or_, _boolean_, _plain_, _range_, _discrete_,
         // Telegram (VENDOR.md edit 13): prefers-color-scheme and its values
-        _prefers_color_scheme_,
+        _prefers_color_scheme_, _light_, _dark_,
         // Telegram (VENDOR.md edit 29.5): prefers-reduced-motion and its values
         _prefers_reduced_motion_, _no_preference_, _reduce_,
         _integer_, _length_, _resolution_, _ratio_, _keyword_, _orientation_, _portrait_, _landscape_, _device_width_,
-        _device_height_, _aspect_ratio_, _device_aspect_ratio_, _color_index_, _monochrome_, _light_, _dark_, )
+        _device_height_, _aspect_ratio_, _device_aspect_ratio_, _color_index_, _monochrome_, )
 #undef STRING_ID
     extern const string_id empty_id; // _id("")
     extern const string_id star_id;  // _id("*")

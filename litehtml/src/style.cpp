@@ -48,8 +48,10 @@ namespace litehtml
         {__webkit_font_smoothing_, font_smoothing_strings              },
         {_white_space_,            white_space_strings                 },
         {_overflow_wrap_,          overflow_wrap_strings               },
-        {_word_break_,             word_break_strings                  },
-        {_user_select_,            user_select_strings                 },
+        {_word_break_,             word_break_strings                  }, // Telegram (VENDOR.md edit 32.2)
+        {_object_fit_,             object_fit_strings                  }, // Telegram (VENDOR.md edit 37)
+        {_text_overflow_,          text_overflow_strings               }, // Telegram (VENDOR.md edit 40)
+        {_user_select_,            user_select_strings                 }, // Nanogram fork: typed user-select (raw copy kept too, edit 45)
 
         {_font_style_,             font_style_strings                  },
         {_font_variant_,           font_variant_strings                },
@@ -366,21 +368,22 @@ namespace litehtml
 
     void style::inherit_property(string_id name, bool important)
     {
-        keyword_property(name, property_value(inherit(), important));
+        global_keyword_property(name, property_value(inherit(), important));
     }
 
-    void style::keyword_property(string_id name, const property_value& value)
+    // Telegram (VENDOR.md edit 33).
+    void style::global_keyword_property(string_id name, const property_value& marker)
     {
         auto atomic_properties = at(shorthands, name);
         if(!atomic_properties.empty())
         {
             for(auto atomic : atomic_properties)
             {
-                add_parsed_property(atomic, value);
+                add_parsed_property(atomic, marker);
             }
         } else
         {
-            add_parsed_property(name, value);
+            add_parsed_property(name, marker);
         }
     }
 
@@ -401,7 +404,11 @@ namespace litehtml
         "transform", "opacity", "color", "background-color", "background", "width", "height", "top", "left", "right",
         "bottom", "box-shadow", "border-color", "max-height", "stroke-dashoffset", "fill", "stroke", "translate",
         "scale", "rotate", "filter", "letter-spacing", "font-size", "margin-top", "margin-left", "flex-grow",
-        "transform-origin", "backdrop-filter", "pointer-events", "touch-action", "quotes", "object-fit", "object-position", "text-overflow",
+        "transform-origin", "backdrop-filter", "pointer-events",
+        // Telegram (VENDOR.md edit 30.1): kept for getComputedStyle, which litehtml does not model.
+        "touch-action", "quotes",
+        // Telegram (VENDOR.md edit 45): the same, -webkit-user-select written as user-select (add_property).
+        "user-select",
         // Telegram (VENDOR.md edit 51): profile 1's properties litehtml keeps no value of, for getComputedStyle.
         "counter-increment", "counter-reset", "unicode-bidi", "color-scheme", "grid-template-areas", "grid-auto-columns",
         "grid-auto-flow", "font-feature-settings", "font-variant-numeric",
@@ -418,7 +425,7 @@ namespace litehtml
         "place-content",
         // Telegram (VENDOR.md edit 51): the cascaded value a CSS animation's implicit keyframe starts from
         // (getComputedStyle reads litehtml's own, edit 53).
-        "z-index", "user-select",
+        "z-index",
     };
 
     static const std::map<string_id, string_id>& raw_declaration_ids()
@@ -450,6 +457,8 @@ namespace litehtml
         return raws.count(name) != 0;
     }
 
+    // Nanogram fork: font-variant-numeric and font-feature-settings are validated and kept as their feature list
+    // (`tnum=1,zero=1`); the merged list reaches the host through document_container::create_font (features).
     static std::string join_font_features(const std::map<std::string, int>& features)
     {
         std::string out;
@@ -643,6 +652,11 @@ namespace litehtml
         {
             name = _backdrop_filter_;
         }
+        // Telegram (VENDOR.md edit 45): one property under both names, so the later declaration wins.
+        if(name == __webkit_user_select_)
+        {
+            name = _user_select_;
+        }
         // Telegram (VENDOR.md edit 15): a list past its cap is cut before anything keeps a copy of it.
         if(css_token_vector capped; cap_list_value(name, value, capped))
         {
@@ -680,19 +694,22 @@ namespace litehtml
 
         if(name == _word_wrap_)
             name = _overflow_wrap_;
-        if(name == __webkit_user_select_)
-            name = _user_select_;
         if(ident == "inherit")
         {
             return inherit_property(name, important);
         }
-        if(_s(name).substr(0, 2) != "--" && is_one_of(ident, "initial", "unset", "revert"))
+        // Telegram (VENDOR.md edit 33): the other CSS-wide keywords; revert-layer stops at the master's layer (edit 50).
+        if(ident == "initial")
         {
-            css_wide_keyword keyword;
-            keyword.kind = ident == "initial" ? css_wide_keyword::initial
-                         : ident == "unset"   ? css_wide_keyword::unset
-                                              : css_wide_keyword::revert;
-            return keyword_property(name, property_value(keyword, important));
+            return global_keyword_property(name, property_value(initial(), important));
+        }
+        if(ident == "unset")
+        {
+            return global_keyword_property(name, property_value(unset(), important));
+        }
+        if(ident == "revert" || ident == "revert-layer")
+        {
+            return global_keyword_property(name, property_value(revert{ident == "revert-layer"}, important));
         }
 
         int         idx[4];
@@ -737,8 +754,10 @@ namespace litehtml
         case __webkit_font_smoothing_:
         case _white_space_:
         case _overflow_wrap_:
-        case _word_break_:
-        case _user_select_:
+        case _word_break_: // Telegram (VENDOR.md edit 32.2)
+        case _object_fit_: // Telegram (VENDOR.md edit 37)
+        case _text_overflow_: // Telegram (VENDOR.md edit 40)
+        case _user_select_: // Nanogram fork: typed user-select
 
         case _font_style_:
         case _font_variant_:
@@ -1062,10 +1081,12 @@ namespace litehtml
             break;
 
         case _font_variant_numeric_:
+            // Nanogram fork: validated, kept as a feature list (`tnum=1`); compute_font merges it into the font's features.
             if(parse_font_variant_numeric(value, str))
                 add_parsed_property(name, property_value(str, important));
             break;
 
+        // Telegram (VENDOR.md edit 32.1) + Nanogram fork: validated, kept as a feature list.
         case _font_feature_settings_:
             if(parse_font_feature_settings(value, str))
                 add_parsed_property(name, property_value(str, important));
@@ -1143,7 +1164,6 @@ namespace litehtml
             break;
 
         case _grid_:
-        case _grid_template_:
             parse_grid_shorthand(name, value, important);
             break;
 
@@ -1210,6 +1230,7 @@ namespace litehtml
             break;
 
         case _letter_spacing_:
+        // Telegram (VENDOR.md edit 32.3): word-spacing, as letter-spacing.
         case _word_spacing_:
             {
                 constexpr auto normal_val = split_css_values<1>("normal");
@@ -1246,6 +1267,43 @@ namespace litehtml
                 }
                 if(valid)
                     add_parsed_property(name, property_value(flags, important));
+            }
+            break;
+
+        // Telegram (VENDOR.md edit 66): grid-template as `none` or `<rows> / <columns>`; its areas form (strings) is not
+        // supported and drops the declaration, as an invalid one.
+        case _grid_template_:
+            if(ident == "none")
+            {
+                add_parsed_property(_grid_template_rows_, property_value(value, important));
+                add_parsed_property(_grid_template_columns_, property_value(value, important));
+            } else
+            {
+                int slash = 0;
+                while(slash < int(value.size()) && value[slash].ch != '/')
+                {
+                    slash++;
+                }
+                bool strings = false;
+                for(const auto& tok : value)
+                {
+                    strings = strings || tok.type == STRING;
+                }
+                if(!strings && slash > 0 && slash + 1 < int(value.size()))
+                {
+                    add_parsed_property(_grid_template_rows_, property_value(slice(value, 0, slash), important));
+                    add_parsed_property(_grid_template_columns_, property_value(slice(value, slash + 1), important));
+                }
+            }
+            break;
+
+        // Telegram (VENDOR.md edit 72).
+        case _transform_box_:
+            if(is_one_of(ident, "fill-box", "content-box", "stroke-box", "border-box", "view-box"))
+            {
+                add_parsed_property(name, property_value(ident == "view-box" ? int(transform_box_view_box)
+                                                                             : int(transform_box_fill_box),
+                                                         important));
             }
             break;
 
@@ -1324,11 +1382,11 @@ namespace litehtml
         case _filter_:
         case _backdrop_filter_:
         case _transform_:
-        case _translate_:
+        case _object_position_: // Telegram (VENDOR.md edit 37): parsed by compute_effects, as background-position
+        case _translate_: // Telegram (VENDOR.md edit 34)
         case _rotate_:
         case _scale_:
         case _transform_origin_:
-        case _transform_box_:
         case _clip_path_:
         case _grid_template_columns_:
         case _grid_template_rows_:
@@ -2766,6 +2824,26 @@ namespace litehtml
         }
     } // namespace
 
+    // Telegram (VENDOR.md edit 33).
+    void style::resolve_reverts(const std::function<const property_value*(string_id, bool)>& master,
+                                const std::function<bool(string_id, size_t)>&                 admit)
+    {
+        for(auto& prop : m_properties)
+        {
+            if(!prop.second.is<revert>())
+                continue;
+            property_value resolved(unset(), false);
+            if(const property_value* value = master(prop.first, prop.second.get<revert>().layer))
+            {
+                if(admit(prop.first, value_heap(*value)))
+                    resolved = *value;
+            }
+            resolved.m_important = prop.second.m_important;
+            resolved.m_order     = prop.second.m_order;
+            prop.second          = std::move(resolved);
+        }
+    }
+
     size_t style::payload_bytes() const
     {
         size_t bytes = 0;
@@ -3068,7 +3146,7 @@ namespace litehtml
                 if(_s(name).substr(0, 2) == "--")
                 {
                     // the guaranteed-invalid value: var() of it takes its fallback, nothing is inherited
-                    property_value invalid_value(css_wide_keyword(), prop.m_important);
+                    property_value invalid_value(initial(), prop.m_important);
                     invalid_value.m_order = prop.m_order;
                     m_properties[name]    = invalid_value;
                     continue;

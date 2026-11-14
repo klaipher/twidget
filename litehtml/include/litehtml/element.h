@@ -125,7 +125,8 @@ namespace litehtml
         virtual bool on_lbutton_up(bool is_click = true);
         virtual void on_click();
         virtual bool set_pseudo_class(string_id cls, bool add);
-        virtual bool has_pseudo_class(string_id /*cls*/) const { return false; }
+        // Telegram (VENDOR.md edit 75): whether set_pseudo_class(cls, true) holds.
+        virtual bool has_pseudo_class(string_id cls) const;
         virtual bool set_class(const char* pclass, bool add);
         virtual bool is_replaced() const;
         virtual bool has_external_intrinsic_size() const;

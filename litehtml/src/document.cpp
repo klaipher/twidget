@@ -4307,17 +4307,18 @@ namespace litehtml
         return newTag;
     }
 
-    uint_ptr document::add_font(const font_description& descr, font_metrics* fm)
+    uint_ptr document::add_font(const font_description& descr, font_metrics* fm, const std::string& features)
     {
         uint_ptr ret = 0;
 
-        std::string key = descr.hash();
+        std::string key = features.empty() ? descr.hash() : descr.hash() + ":ff=" + features;
 
         if(m_fonts.find(key) == m_fonts.end())
         {
             font_item fi = {0, {}};
 
-            fi.font      = m_container->create_font(descr, this, &fi.metrics);
+            fi.font      = features.empty() ? m_container->create_font(descr, this, &fi.metrics)
+                                        : m_container->create_font(descr, features, this, &fi.metrics);
             m_fonts[key] = fi;
             ret          = fi.font;
             if(fm)
@@ -4328,7 +4329,7 @@ namespace litehtml
         return ret;
     }
 
-    uint_ptr document::get_font(const font_description& descr, font_metrics* fm)
+    uint_ptr document::get_font(const font_description& descr, font_metrics* fm, const std::string& features)
     {
         if(descr.size == 0_px)
         {
@@ -4339,7 +4340,7 @@ namespace litehtml
             return 0;
         }
 
-        auto key = descr.hash();
+        auto key = features.empty() ? descr.hash() : descr.hash() + ":ff=" + features;
 
         auto el = m_fonts.find(key);
 
@@ -4351,7 +4352,7 @@ namespace litehtml
             }
             return el->second.font;
         }
-        return add_font(descr, fm);
+        return add_font(descr, fm, features);
     }
 
     std::atomic<uint64_t> document::s_layout_hits{0};
@@ -4601,6 +4602,11 @@ namespace litehtml
         {
             return 0_px;
         }
+        // Telegram (VENDOR.md edit 48): a calc at `size`, its font-relative terms by `metrics`.
+        if(val.is_calc())
+        {
+            return val.calc_value(size, calc_fonts_for(metrics));
+        }
         // Telegram: viewport_changed() computes styles again only for a document that resolved a viewport unit.
         if(val.units() == css_units_vw || val.units() == css_units_vh || val.units() == css_units_vmin || val.units() == css_units_vmax)
             m_viewport_units = true;
@@ -4609,11 +4615,6 @@ namespace litehtml
         {
         case css_units_percentage:
             ret = val.calc_percent(size);
-            break;
-        case css_units_calc:
-            ret = calc_evaluate(static_cast<int>(val.calc_index()), size, [&](float value, css_units unit) {
-                return to_pixels(css_length(value, unit), metrics, size).value();
-            });
             break;
         case css_units_em:
             ret = metrics.font_size * val.val();
@@ -4664,24 +4665,36 @@ namespace litehtml
         return ret;
     }
 
+    // Telegram (VENDOR.md edit 48).
+    calc_fonts document::calc_fonts_for(const font_metrics& metrics) const
+    {
+        calc_fonts fonts;
+        fonts.em  = double(metrics.font_size);
+        fonts.rem = m_root ? double(m_root->css().get_font_size().value()) : double(metrics.font_size);
+        fonts.ex  = double(metrics.x_height.value());
+        fonts.ch  = double(metrics.ch_width.value());
+        return fonts;
+    }
+
     void document::cvt_units(css_length& val, const font_metrics& metrics, pixel_t size) const
     {
         if(val.is_predefined())
         {
             return;
         }
-        if(val.units() == css_units_calc)
+        // Telegram (VENDOR.md edit 48): font-relative terms fold into px now; a calc left without a percentage is a
+        // plain px length, and one with a percentage stays deferred to layout (calc_percent).
+        if(val.is_calc())
         {
-            // Every leaf but % in px; with no % left, the length is a plain one.
-            float px    = 0;
-            int   index = calc_resolve_units(val.calc_index(), [&](float value, css_units unit) {
-                return to_pixels(css_length(value, unit), metrics, size).value();
-            }, px);
-            if(index < 0)
-                val.set_value(px, css_units_px);
+            const calc_fonts fonts  = calc_fonts_for(metrics);
+            calc_ref         folded = calc_node::fold_fonts(val.calc(), fonts);
+            if(!folded->has_percent())
+                val.set_value(float(folded->eval(0, fonts)), css_units_px);
             else
-                val.set_calc(index);
-        } else if(val.units() != css_units_percentage)
+                val.set_calc(std::move(folded));
+            return;
+        }
+        if(val.units() != css_units_percentage)
         {
             val.set_value(static_cast<float>(to_pixels(val, metrics, size)), css_units_px);
         }

@@ -202,8 +202,9 @@ litehtml::rendered_width litehtml::render_item_block::_render(pixel_t x, pixel_t
     if(css().get_aspect_ratio() > 0 && self_size.height.type == containing_block_context::cbc_value_type_auto &&
        (containing_block_size.size_mode & containing_block_context::size_mode_content) == 0)
     {
-        // From the width it gets: max-width and min-width apply first.
-        pixel_t ratio_width = self_size.render_width;
+        // Telegram (VENDOR.md edit 67): the ratio follows the width min-width and max-width leave, not the width
+        // available: `max-width: 264px; aspect-ratio: 1` in 374 px is 264 px tall.
+        pixel_t ratio_width = pixel_t(self_size.render_width);
         if(self_size.max_width.type != containing_block_context::cbc_value_type_none)
         {
             ratio_width = std::min<pixel_t>(ratio_width, self_size.max_width);

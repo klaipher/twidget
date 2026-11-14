@@ -620,6 +620,7 @@ namespace litehtml
     bool element::on_lbutton_down() LITEHTML_RETURN_FUNC(false);
     bool element::on_lbutton_up(const bool /*is_click*/) LITEHTML_RETURN_FUNC(false);
     bool element::set_pseudo_class(string_id /*cls*/, bool /*add*/) LITEHTML_RETURN_FUNC(false);
+    bool element::has_pseudo_class(string_id /*cls*/) const LITEHTML_RETURN_FUNC(false);
     bool element::set_class(const char* /*pclass*/, bool /*add*/) LITEHTML_RETURN_FUNC(false);
     bool element::is_replaced() const LITEHTML_RETURN_FUNC(false);
     bool element::has_external_intrinsic_size() const LITEHTML_RETURN_FUNC(is_replaced());

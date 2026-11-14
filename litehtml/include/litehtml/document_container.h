@@ -44,6 +44,14 @@ namespace litehtml
       public:
         virtual litehtml::uint_ptr create_font(const font_description& descr, const document* doc,
                                                litehtml::font_metrics* fm)                                          = 0;
+        // Nanogram fork: the font features (font-variant-numeric / font-feature-settings merged, `tnum=1,zero=1`) the
+        // asserted font_description has no room for. A host that shapes with features overrides this; the default
+        // ignores them.
+        virtual litehtml::uint_ptr create_font(const font_description& descr, const std::string& /*features*/,
+                                               const document* doc, litehtml::font_metrics* fm)
+        {
+            return create_font(descr, doc, fm);
+        }
         virtual void               delete_font(litehtml::uint_ptr hFont)                                            = 0;
         virtual pixel_t            text_width(const char* text, litehtml::uint_ptr hFont)                           = 0;
         virtual std::shared_ptr<text_breaker> create_text_breaker(const std::string&, uint_ptr) { return nullptr; }
@@ -53,6 +61,16 @@ namespace litehtml
         virtual bool bidi_levels(const std::vector<std::string>& runs, bool rtl, std::vector<uint8_t>& levels) { return false; }
         virtual void               draw_text(litehtml::uint_ptr hdc, const char* text, litehtml::uint_ptr hFont,
                                              litehtml::web_color color, const litehtml::position& pos)              = 0;
+        // Nanogram fork: word-spacing on every word separator (U+0020 and U+00A0, CSS Text 3 §8.1), preserved spaces
+        // and no-break spaces inside a word too, not only collapsible spaces. A host that returns true has those
+        // widened in layout and is handed such a run's word-spacing in draw_spaced_text, to place its pieces; the
+        // default keeps upstream's behaviour.
+        virtual bool word_spacing_on_every_separator() const { return false; }
+        virtual void draw_spaced_text(litehtml::uint_ptr hdc, const char* text, litehtml::uint_ptr hFont,
+                                      litehtml::web_color color, const litehtml::position& pos, pixel_t /*word_spacing*/)
+        {
+            draw_text(hdc, text, hFont, color, pos);
+        }
         virtual pixel_t            pt_to_px(float pt) const                                                         = 0;
         virtual pixel_t            get_default_font_size() const                                                    = 0;
         virtual const char*        get_default_font_name() const                                                    = 0;
@@ -107,6 +125,11 @@ namespace litehtml
         virtual void set_clip_path(const vector_path& path) {}
         virtual bool point_in_clip_path(const vector_path& path, pixel_t x, pixel_t y) { return true; }
         virtual void begin_group(litehtml::uint_ptr /*hdc*/, const paint_group& /*group*/) {}
+        // Nanogram: the element that owns the group (paint_group has no owner in the 13.2 layout); default is begin_group.
+        virtual void begin_group(litehtml::uint_ptr hdc, const paint_group& group, const element* /*owner*/)
+        {
+            begin_group(hdc, group);
+        }
         virtual void draw_filtered(litehtml::uint_ptr hdc, const filter_paint& /*filter*/,
                                    const std::function<void(litehtml::uint_ptr)>& paint)
         {
@@ -114,6 +137,12 @@ namespace litehtml
         }
         virtual void draw_backdrop(litehtml::uint_ptr /*hdc*/, const filter_paint& /*filter*/) {}
         virtual void draw_path(litehtml::uint_ptr /*hdc*/, const vector_path& /*path*/) {}
+        // Nanogram: a path whose stroke is a gradient (vector_path has no room for it in the 13.2 layout). The default
+        // draws the path with its solid stroke colour (the last stop).
+        virtual void draw_path_stroke_gradient(litehtml::uint_ptr hdc, const vector_path& path, const svg_gradient& /*stroke*/)
+        {
+            draw_path(hdc, path);
+        }
         virtual void end_group(litehtml::uint_ptr /*hdc*/) {}
         virtual bool draw_cached(litehtml::uint_ptr /*hdc*/, const position& /*box*/, uint64_t /*key*/,
                                  const std::function<void(litehtml::uint_ptr)>& /*paint*/)

@@ -911,6 +911,53 @@ namespace litehtml
         return true;
     }
 
+    // Telegram (VENDOR.md edit 34).
+    bool parse_individual_transform(string_id name, const css_token_vector& tokens, transform_function& fn)
+    {
+        std::vector<css_token> args;
+        for(const auto& tok : tokens)
+        {
+            if(tok.type == WHITESPACE)
+                continue;
+            css_token arg = tok;
+            // Edit 56: as transform's translate functions, the translate property's math functions are from_token's.
+            const bool whole = name == _translate_ && arg.type == CV_FUNCTION;
+            if((!whole && !fold_calc(arg)) || (is_one_of(arg.type, NUMBER, PERCENTAGE, DIMENSION) && !std::isfinite(arg.n.number)))
+                return false;
+            args.push_back(arg);
+        }
+        if(args.empty() || args.size() > 2 || args[0].ident() == "none")
+            return false;
+        switch(name)
+        {
+        case _translate_:
+            fn.kind = transform_function::translate;
+            return fn.x.from_token(args[0], f_length_percentage) &&
+                   (args.size() == 1 || fn.y.from_token(args[1], f_length_percentage));
+        case _rotate_:
+            if(args.size() == 2 && args[0].ident() == "z")
+                args.erase(args.begin());
+            fn.kind = transform_function::rotate;
+            return args.size() == 1 && parse_radians(args[0], fn.v[0]);
+        case _scale_:
+            {
+                fn.kind  = transform_function::scale;
+                float sx = 1;
+                float sy = 1;
+                if(!parse_number(args[0], sx))
+                    return false;
+                sy = sx;
+                if(args.size() == 2 && !parse_number(args[1], sy))
+                    return false;
+                fn.v[0] = sx;
+                fn.v[1] = sy;
+                return true;
+            }
+        default:
+            return false;
+        }
+    }
+
     bool parse_transform(const css_token_vector& tokens, transform_vector& functions)
     {
         functions.clear();
@@ -926,10 +973,20 @@ namespace litehtml
                 functions.clear();
                 return false;
             }
-            // Math that mixes % and px does not fold: it stays a calc length, which layout resolves
-            // against the box (css_length::from_token), and fails there if it is no length.
+            // Telegram (VENDOR.md edit 56): a translation's math function goes whole to css_length::from_token, whose
+            // tree holds one that mixes a percentage with a length (calc(100% + 10px)), as a width's does; the fold
+            // below takes one unit only.
+            const bool translates = is_one_of(lowcase(tok.name()), "translate", "translatex", "translatey", "translate3d");
             for(auto& arg : args)
-                fold_calc(arg);
+            {
+                if(translates && arg.type == CV_FUNCTION)
+                    continue;
+                if(!fold_calc(arg))
+                {
+                    functions.clear();
+                    return false;
+                }
+            }
             // Telegram: the tokenizer reads 1e999 as inf and 0e999 as NaN; a non-finite number in any function,
             // even one ignored below (perspective, an off-axis rotate3d), leaves the whole transform unset.
             for(const auto& arg : args)

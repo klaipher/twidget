@@ -50,11 +50,6 @@ namespace litehtml
         std::vector<std::unique_ptr<litehtml::line_box>> m_line_boxes;
         rendered_width                                   m_rendered_width;
         pixel_t                                          m_va_applied = 0_px;
-        std::vector<position>                            m_ellipses;  // text-overflow: ellipsis, in the content box
-        bool                                             m_cut = false;  // its texts may be cut
-
-        /// text-overflow: ellipsis: cuts the lines too long for the box and places their "…".
-        void    apply_ellipsis(pixel_t room);
 
         rendered_width _render_content(pixel_t x, pixel_t y, bool second_pass,
                                        const containing_block_context& self_size, formatting_context* fmt_ctx) override;
@@ -80,13 +75,17 @@ namespace litehtml
             return std::make_shared<render_item_inline_context>(src_el());
         }
 
-        void    draw_children(uint_ptr hdc, pixel_t x, pixel_t y, const position* clip, draw_flag flag, int zindex) override;
         pixel_t get_first_baseline() override;
         pixel_t get_last_baseline() override;
         pixel_t control_baseline_inset() const;
         size text_content_size() const;
         rendered_width measure(pixel_t x, pixel_t y, const containing_block_context& cb,
             formatting_context* fmt_ctx, bool second_pass = false, pixel_t* measured_height = nullptr) override;
+
+      private:
+        // Telegram (VENDOR.md edit 40): text-overflow: ellipsis, marked on the pieces of each line wider than the
+        // content box (render_item::set_ellipsis).
+        void apply_ellipsis(const containing_block_context& self_size);
     };
 } // namespace litehtml
 
