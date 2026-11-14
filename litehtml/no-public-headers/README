@@ -1,0 +1,2 @@
+SwiftPM (Xcode 27) requires the publicHeadersPath folder of TwidgetLitehtml to exist. It holds no headers on purpose:
+litehtml headers are reached through headerSearchPath, so SwiftPM does not wrap them in a Clang module.
