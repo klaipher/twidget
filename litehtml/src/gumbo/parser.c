@@ -60,7 +60,7 @@ static void* malloc_wrapper(void* unused, size_t size) { return malloc(size); }
 static void free_wrapper(void* unused, void* ptr) { free(ptr); }
 
 const GumboOptions kGumboDefaultOptions = {&malloc_wrapper, &free_wrapper, NULL,
-    8, false, -1, GUMBO_TAG_LAST, GUMBO_NAMESPACE_HTML};
+    8, false, 0, GUMBO_TAG_LAST, GUMBO_NAMESPACE_HTML, 512, 256, 100000, 512, -1, -1};
 
 static const GumboStringPiece kDoctypeHtml = GUMBO_STRING("html");
 static const GumboStringPiece kPublicIdHtml4_0 =
@@ -397,6 +397,17 @@ typedef struct GumboInternalParserState {
   // flag appropriately.
   bool _closed_body_tag;
   bool _closed_html_tag;
+
+  // Telegram fork: nodes created so far, against options->max_nodes.
+  unsigned int _node_count;
+
+  // Telegram fork: attributes the tree keeps so far, against
+  // options->max_total_attributes.
+  unsigned int _attribute_count;
+
+  // Telegram fork: bytes of the attribute strings the tree keeps so far, against
+  // options->max_total_attribute_bytes.
+  size_t _attribute_bytes;
 } GumboParserState;
 
 static bool token_has_attribute(const GumboToken* token, const char* name) {
@@ -440,8 +451,27 @@ static void set_frameset_not_ok(GumboParser* parser) {
   parser->_parser_state->_frameset_ok = false;
 }
 
+// Telegram fork: max_total_attribute_bytes. Adds the bytes gumbo allocated for
+// a kept attribute's name and value copies: strlen + 1 each, as
+// gumbo_copy_stringz and gumbo_string_buffer_to_string allocate them (the
+// tokenizer replaces a NUL in a name or value, so strlen is the length). The
+// adjust_*_attributes renames happen on the token before the element takes it,
+// so the final name is what is counted. Only while the limit is on, so a parse
+// without it does no extra strlen.
+static void count_kept_attribute_bytes(
+    GumboParser* parser, const GumboAttribute* attr) {
+  if (parser->_options->max_total_attribute_bytes >= 0 &&
+      parser->_parser_state) {
+    parser->_parser_state->_attribute_bytes +=
+        strlen(attr->name) + 1 + strlen(attr->value) + 1;
+  }
+}
+
 static GumboNode* create_node(GumboParser* parser, GumboNodeType type) {
   GumboNode* node = gumbo_parser_allocate(parser, sizeof(GumboNode));
+  if (parser->_parser_state) {
+    parser->_parser_state->_node_count++;
+  }
   node->parent = NULL;
   node->index_within_parent = -1;
   node->type = type;
@@ -458,6 +488,9 @@ static GumboNode* new_document_node(GumboParser* parser) {
   // doc type token.
   GumboDocument* document = &document_node->v.document;
   document->has_doctype = false;
+  // Telegram fork: the fragment parser never runs the initial insertion mode,
+  // which is what set this, so a fragment's document read uninitialized memory.
+  document->doc_type_quirks_mode = GUMBO_DOCTYPE_NO_QUIRKS;
   document->name = NULL;
   document->public_identifier = NULL;
   document->system_identifier = NULL;
@@ -466,6 +499,8 @@ static GumboNode* new_document_node(GumboParser* parser) {
 
 static void output_init(GumboParser* parser) {
   GumboOutput* output = gumbo_parser_allocate(parser, sizeof(GumboOutput));
+  output->stopped_at_node_limit = false;
+  output->stopped_at_attribute_limit = false;
   output->root = NULL;
   output->document = new_document_node(parser);
   parser->_output = output;
@@ -491,6 +526,9 @@ static void parser_state_init(GumboParser* parser) {
   parser_state->_current_token = NULL;
   parser_state->_closed_body_tag = false;
   parser_state->_closed_html_tag = false;
+  parser_state->_node_count = 0;
+  parser_state->_attribute_count = 0;
+  parser_state->_attribute_bytes = 0;
   parser->_parser_state = parser_state;
 }
 
@@ -925,6 +963,50 @@ static void record_end_of_element(
                                   : kGumboEmptyString;
 }
 
+// Telegram fork: every change to the stack of open elements goes through
+// these, so an element knows in constant time whether it is open.
+static void open_elements_push(GumboParser* parser, GumboNode* node) {
+  node->v.element.is_open = true;
+  gumbo_vector_add(parser, (void*) node, &parser->_parser_state->_open_elements);
+}
+
+static void open_elements_insert_at(
+    GumboParser* parser, GumboNode* node, int index) {
+  node->v.element.is_open = true;
+  gumbo_vector_insert_at(
+      parser, (void*) node, index, &parser->_parser_state->_open_elements);
+}
+
+static void open_elements_remove_at(GumboParser* parser, int index) {
+  GumboNode* node = gumbo_vector_remove_at(
+      parser, index, &parser->_parser_state->_open_elements);
+  node->v.element.is_open = false;
+}
+
+static void open_elements_remove(GumboParser* parser, GumboNode* node) {
+  GumboVector* open_elements = &parser->_parser_state->_open_elements;
+  for (int i = open_elements->length; --i >= 0;) {
+    if (open_elements->data[i] == node) {
+      open_elements_remove_at(parser, i);
+      return;
+    }
+  }
+}
+
+static void open_elements_replace_at(
+    GumboParser* parser, int index, GumboNode* node) {
+  GumboVector* open_elements = &parser->_parser_state->_open_elements;
+  ((GumboNode*) open_elements->data[index])->v.element.is_open = false;
+  node->v.element.is_open = true;
+  open_elements->data[index] = node;
+}
+
+static bool open_elements_full(GumboParser* parser) {
+  int max = parser->_options->max_tree_depth;
+  return max >= 0 &&
+         parser->_parser_state->_open_elements.length >= (unsigned int) max;
+}
+
 static GumboNode* pop_current_node(GumboParser* parser) {
   GumboParserState* state = parser->_parser_state;
   maybe_flush_text_node_buffer(parser);
@@ -938,6 +1020,7 @@ static GumboNode* pop_current_node(GumboParser* parser) {
     assert(state->_open_elements.length == 0);
     return NULL;
   }
+  current_node->v.element.is_open = false;
   assert(current_node->type == GUMBO_NODE_ELEMENT ||
          current_node->type == GUMBO_NODE_TEMPLATE);
   bool is_closed_body_or_html_tag =
@@ -999,6 +1082,8 @@ static GumboNode* create_element(GumboParser* parser, GumboTag tag) {
   GumboElement* element = &node->v.element;
   gumbo_vector_init(parser, 1, &element->children);
   gumbo_vector_init(parser, 0, &element->attributes);
+  element->is_open = false;
+  element->attributes_hash = 0;
   element->tag = tag;
   element->tag_namespace = GUMBO_NAMESPACE_HTML;
   element->original_tag = kGumboEmptyString;
@@ -1025,6 +1110,16 @@ static GumboNode* create_element_from_token(
   GumboElement* element = &node->v.element;
   gumbo_vector_init(parser, 1, &element->children);
   element->attributes = start_tag->attributes;
+  // Telegram fork: max_total_attributes. The element takes the token's
+  // attributes, which the tree now keeps.
+  if (parser->_parser_state) {
+    parser->_parser_state->_attribute_count += start_tag->attributes.length;
+  }
+  for (unsigned int i = 0; i < start_tag->attributes.length; ++i) {
+    count_kept_attribute_bytes(parser, start_tag->attributes.data[i]);
+  }
+  element->is_open = false;
+  element->attributes_hash = 0;
   element->tag = start_tag->tag;
   element->tag_namespace = tag_namespace;
 
@@ -1060,7 +1155,7 @@ static void insert_element(GumboParser* parser, GumboNode* node,
   }
   InsertionLocation location = get_appropriate_insertion_location(parser, NULL);
   insert_node(parser, node, location);
-  gumbo_vector_add(parser, (void*) node, &state->_open_elements);
+  open_elements_push(parser, node);
 }
 
 // Convenience method that combines create_element_from_token and
@@ -1166,6 +1261,37 @@ static bool find_last_anchor_index(GumboParser* parser, int* anchor_index) {
 // formatting elements (after the last active scope marker) that have a specific
 // tag.  If this is > 0, then earliest_matching_index will be filled in with the
 // index of the first such element.
+// Telegram fork: an order-independent hash of an attribute set (a sum of
+// per-attribute hashes), so unequal sets almost never reach the quadratic
+// comparison in all_attributes_match.
+static uint64_t mix64(uint64_t x) {
+  x ^= x >> 30;
+  x *= 0xbf58476d1ce4e5b9ULL;
+  x ^= x >> 27;
+  x *= 0x94d049bb133111ebULL;
+  x ^= x >> 31;
+  return x;
+}
+
+static uint64_t fnv1a(const char* s, uint64_t h) {
+  for (; *s; ++s) {
+    h ^= (unsigned char) *s;
+    h *= 0x100000001b3ULL;
+  }
+  return h;
+}
+
+static uint64_t attributes_hash(const GumboVector* attributes) {
+  uint64_t sum = attributes->length;
+  for (unsigned int i = 0; i < attributes->length; ++i) {
+    const GumboAttribute* attr = attributes->data[i];
+    uint64_t h = fnv1a(attr->name, 0xcbf29ce484222325ULL);
+    h = fnv1a(attr->value, mix64(h ^ attr->attr_namespace));
+    sum += mix64(h);
+  }
+  return sum;
+}
+
 static int count_formatting_elements_of_tag(GumboParser* parser,
     const GumboNode* desired_node, int* earliest_matching_index) {
   const GumboElement* desired_element = &desired_node->v.element;
@@ -1179,6 +1305,7 @@ static int count_formatting_elements_of_tag(GumboParser* parser,
     assert(node->type == GUMBO_NODE_ELEMENT);
     if (node_qualified_tag_is(
             node, desired_element->tag_namespace, desired_element->tag) &&
+        node->v.element.attributes_hash == desired_element->attributes_hash &&
         all_attributes_match(
             &node->v.element.attributes, &desired_element->attributes)) {
       num_identical_elements++;
@@ -1199,6 +1326,13 @@ static void add_formatting_element(GumboParser* parser, const GumboNode* node) {
     gumbo_debug("Adding a formatting element.\n");
   }
 
+  if (node != &kActiveFormattingScopeMarker) {
+    // The hash is computed once, here: every element in the list either went
+    // through this function or is a clone of one that did (clone_node copies it).
+    ((GumboNode*) node)->v.element.attributes_hash =
+        attributes_hash(&node->v.element.attributes);
+  }
+
   // Hunt for identical elements.
   int earliest_identical_element = elements->length;
   int num_identical_elements = count_formatting_elements_of_tag(
@@ -1211,17 +1345,30 @@ static void add_formatting_element(GumboParser* parser, const GumboNode* node) {
     gumbo_vector_remove_at(parser, earliest_identical_element, elements);
   }
 
+  // Telegram fork: max_formatting_elements. Distinct entries after the last
+  // marker would otherwise grow without bound, and each formatting start tag
+  // walks them. The walk stops after `max` entries.
+  int max_formatting = parser->_options->max_formatting_elements;
+  if (node != &kActiveFormattingScopeMarker && max_formatting >= 0) {
+    int count = 0;
+    int earliest = -1;
+    for (int i = elements->length; --i >= 0 && count < max_formatting;) {
+      if (elements->data[i] == &kActiveFormattingScopeMarker) {
+        break;
+      }
+      count++;
+      earliest = i;
+    }
+    if (count >= max_formatting && earliest >= 0) {
+      gumbo_vector_remove_at(parser, earliest, elements);
+    }
+  }
+
   gumbo_vector_add(parser, (void*) node, elements);
 }
 
 static bool is_open_element(GumboParser* parser, const GumboNode* node) {
-  GumboVector* open_elements = &parser->_parser_state->_open_elements;
-  for (unsigned int i = 0; i < open_elements->length; ++i) {
-    if (open_elements->data[i] == node) {
-      return true;
-    }
-  }
-  return false;
+  return node->v.element.is_open;
 }
 
 // Clones attributes, tags, etc. of a node, but does not copy the content.  The
@@ -1231,7 +1378,9 @@ GumboNode* clone_node(
     GumboParser* parser, GumboNode* node, GumboParseFlags reason) {
   assert(node->type == GUMBO_NODE_ELEMENT || node->type == GUMBO_NODE_TEMPLATE);
   GumboNode* new_node = gumbo_parser_allocate(parser, sizeof(GumboNode));
+  parser->_parser_state->_node_count++;
   *new_node = *node;
+  new_node->v.element.is_open = false;
   new_node->parent = NULL;
   new_node->index_within_parent = -1;
   // Clear the GUMBO_INSERTION_IMPLICIT_END_TAG flag, as the cloned node may
@@ -1242,6 +1391,9 @@ GumboNode* clone_node(
   gumbo_vector_init(parser, 1, &element->children);
 
   const GumboVector* old_attributes = &node->v.element.attributes;
+  // Telegram fork: max_total_attributes. The clone's attributes are copies the
+  // tree keeps (reconstructing the active formatting elements clones them).
+  parser->_parser_state->_attribute_count += old_attributes->length;
   gumbo_vector_init(parser, old_attributes->length, &element->attributes);
   for (unsigned int i = 0; i < old_attributes->length; ++i) {
     const GumboAttribute* old_attr = old_attributes->data[i];
@@ -1250,6 +1402,8 @@ GumboNode* clone_node(
     *attr = *old_attr;
     attr->name = gumbo_copy_stringz(parser, old_attr->name);
     attr->value = gumbo_copy_stringz(parser, old_attr->value);
+    // Telegram fork: max_total_attribute_bytes. The copies are new bytes.
+    count_kept_attribute_bytes(parser, attr);
     gumbo_vector_add(parser, attr, &element->attributes);
   }
   return new_node;
@@ -1262,7 +1416,7 @@ GumboNode* clone_node(
 static void reconstruct_active_formatting_elements(GumboParser* parser) {
   GumboVector* elements = &parser->_parser_state->_active_formatting_elements;
   // Step 1
-  if (elements->length == 0) {
+  if (elements->length == 0 || open_elements_full(parser)) {
     return;
   }
 
@@ -1289,7 +1443,7 @@ static void reconstruct_active_formatting_elements(GumboParser* parser) {
   ++i;
   gumbo_debug("Reconstructing elements from %d on %s parent.\n", i,
       gumbo_normalized_tagname(get_current_node(parser)->v.element.tag));
-  for (; i < elements->length; ++i) {
+  for (; i < elements->length && !open_elements_full(parser); ++i) {
     // Step 7 & 8.
     assert(elements->length > 0);
     assert(i < elements->length);
@@ -1301,8 +1455,7 @@ static void reconstruct_active_formatting_elements(GumboParser* parser) {
     InsertionLocation location =
         get_appropriate_insertion_location(parser, NULL);
     insert_node(parser, clone, location);
-    gumbo_vector_add(
-        parser, (void*) clone, &parser->_parser_state->_open_elements);
+    open_elements_push(parser, clone);
 
     // Step 10.
     elements->data[i] = clone;
@@ -1656,6 +1809,11 @@ static void merge_attributes(
       // double-deleted.
       gumbo_vector_add(parser, attr, node_attr);
       token_attr->data[i] = NULL;
+      // Telegram fork: max_total_attributes and max_total_attribute_bytes. The
+      // node keeps this attribute (a repeated <html>/<body> merges its new
+      // attributes into the existing one).
+      parser->_parser_state->_attribute_count++;
+      count_kept_attribute_bytes(parser, attr);
     }
   }
   // When attributes are merged, it means the token has been ignored and merged
@@ -1942,7 +2100,7 @@ static bool adoption_agency_algorithm(
       }
       if (formatting_index == -1) {
         // Step 13.6.
-        gumbo_vector_remove_at(parser, node_index, &state->_open_elements);
+        open_elements_remove_at(parser, node_index);
         continue;
       }
       // Step 13.7.
@@ -1952,7 +2110,7 @@ static bool adoption_agency_algorithm(
       assert(formatting_index >= 0);
       state->_active_formatting_elements.data[formatting_index] = node;
       assert(node_index >= 0);
-      state->_open_elements.data[node_index] = node;
+      open_elements_replace_at(parser, node_index, node);
       // Step 13.8.
       if (last_node == furthest_block) {
         bookmark = formatting_index + 1;
@@ -2022,13 +2180,12 @@ static bool adoption_agency_algorithm(
         &state->_active_formatting_elements);
 
     // Step 19.
-    gumbo_vector_remove(parser, formatting_node, &state->_open_elements);
+    open_elements_remove(parser, formatting_node);
     int insert_at =
         gumbo_vector_index_of(&state->_open_elements, furthest_block) + 1;
     assert(insert_at >= 0);
     assert((unsigned int) insert_at <= state->_open_elements.length);
-    gumbo_vector_insert_at(
-        parser, new_formatting_node, insert_at, &state->_open_elements);
+    open_elements_insert_at(parser, new_formatting_node, insert_at);
   }  // Step 20.
   return true;
 }
@@ -2327,9 +2484,9 @@ static bool handle_after_head(GumboParser* parser, GumboToken* token) {
     // This must be flushed before we push the head element on, as there may be
     // pending character tokens that should be attached to the root.
     maybe_flush_text_node_buffer(parser);
-    gumbo_vector_add(parser, state->_head_element, &state->_open_elements);
+    open_elements_push(parser, state->_head_element);
     bool result = handle_in_head(parser, token);
-    gumbo_vector_remove(parser, state->_head_element, &state->_open_elements);
+    open_elements_remove(parser, state->_head_element);
     return result;
   } else if (tag_is(token, kEndTag, GUMBO_TAG_TEMPLATE)) {
     return handle_in_head(parser, token);
@@ -2348,37 +2505,46 @@ static bool handle_after_head(GumboParser* parser, GumboToken* token) {
   }
 }
 
-static void destroy_node(GumboParser* parser, GumboNode* node) {
-  switch (node->type) {
-    case GUMBO_NODE_DOCUMENT: {
-      GumboDocument* doc = &node->v.document;
-      for (unsigned int i = 0; i < doc->children.length; ++i) {
-        destroy_node(parser, doc->children.data[i]);
-      }
-      gumbo_parser_deallocate(parser, (void*) doc->children.data);
-      gumbo_parser_deallocate(parser, (void*) doc->name);
-      gumbo_parser_deallocate(parser, (void*) doc->public_identifier);
-      gumbo_parser_deallocate(parser, (void*) doc->system_identifier);
-    } break;
-    case GUMBO_NODE_TEMPLATE:
-    case GUMBO_NODE_ELEMENT:
-      for (unsigned int i = 0; i < node->v.element.attributes.length; ++i) {
-        gumbo_destroy_attribute(parser, node->v.element.attributes.data[i]);
-      }
-      gumbo_parser_deallocate(parser, node->v.element.attributes.data);
-      for (unsigned int i = 0; i < node->v.element.children.length; ++i) {
-        destroy_node(parser, node->v.element.children.data[i]);
-      }
-      gumbo_parser_deallocate(parser, node->v.element.children.data);
-      break;
-    case GUMBO_NODE_TEXT:
-    case GUMBO_NODE_CDATA:
-    case GUMBO_NODE_COMMENT:
-    case GUMBO_NODE_WHITESPACE:
-      gumbo_parser_deallocate(parser, (void*) node->v.text.text);
-      break;
+// Telegram fork: iterative, so a deeply nested tree cannot overflow the stack
+// while it is freed.
+static void destroy_node(GumboParser* parser, GumboNode* root) {
+  GumboVector stack;
+  gumbo_vector_init(parser, 16, &stack);
+  gumbo_vector_add(parser, root, &stack);
+  while (stack.length > 0) {
+    GumboNode* node = gumbo_vector_pop(parser, &stack);
+    switch (node->type) {
+      case GUMBO_NODE_DOCUMENT: {
+        GumboDocument* doc = &node->v.document;
+        for (unsigned int i = 0; i < doc->children.length; ++i) {
+          gumbo_vector_add(parser, doc->children.data[i], &stack);
+        }
+        gumbo_parser_deallocate(parser, (void*) doc->children.data);
+        gumbo_parser_deallocate(parser, (void*) doc->name);
+        gumbo_parser_deallocate(parser, (void*) doc->public_identifier);
+        gumbo_parser_deallocate(parser, (void*) doc->system_identifier);
+      } break;
+      case GUMBO_NODE_TEMPLATE:
+      case GUMBO_NODE_ELEMENT:
+        for (unsigned int i = 0; i < node->v.element.attributes.length; ++i) {
+          gumbo_destroy_attribute(parser, node->v.element.attributes.data[i]);
+        }
+        gumbo_parser_deallocate(parser, node->v.element.attributes.data);
+        for (unsigned int i = 0; i < node->v.element.children.length; ++i) {
+          gumbo_vector_add(parser, node->v.element.children.data[i], &stack);
+        }
+        gumbo_parser_deallocate(parser, node->v.element.children.data);
+        break;
+      case GUMBO_NODE_TEXT:
+      case GUMBO_NODE_CDATA:
+      case GUMBO_NODE_COMMENT:
+      case GUMBO_NODE_WHITESPACE:
+        gumbo_parser_deallocate(parser, (void*) node->v.text.text);
+        break;
+    }
+    gumbo_parser_deallocate(parser, node);
   }
-  gumbo_parser_deallocate(parser, node);
+  gumbo_vector_destroy(parser, &stack);
 }
 
 // http://www.whatwg.org/specs/web-apps/current-work/complete/tokenization.html#parsing-main-inbody
@@ -2641,7 +2807,7 @@ static bool handle_in_body(GumboParser* parser, GumboToken* token) {
       GumboVector* open_elements = &state->_open_elements;
       int index = gumbo_vector_index_of(open_elements, node);
       assert(index >= 0);
-      gumbo_vector_remove_at(parser, index, open_elements);
+      open_elements_remove_at(parser, index);
       return result;
     }
   } else if (tag_is(token, kEndTag, GUMBO_TAG_P)) {
@@ -2715,7 +2881,7 @@ static bool handle_in_body(GumboParser* parser, GumboToken* token) {
       if (find_last_anchor_index(parser, &last_a)) {
         void* last_element = gumbo_vector_remove_at(
             parser, last_a, &state->_active_formatting_elements);
-        gumbo_vector_remove(parser, last_element, &state->_open_elements);
+        open_elements_remove(parser, last_element);
       }
       success = false;
     }
@@ -3997,6 +4163,8 @@ GumboOutput* gumbo_parse_with_options(
     const GumboOptions* options, const char* buffer, size_t length) {
   GumboParser parser;
   parser._options = options;
+  // Telegram fork: create_node counts nodes once the parser state exists.
+  parser._parser_state = NULL;
   output_init(&parser);
   gumbo_tokenizer_state_init(&parser, buffer, length);
   parser_state_init(&parser);
@@ -4051,7 +4219,16 @@ GumboOutput* gumbo_parse_with_options(
         !(token.type == GUMBO_TOKEN_START_TAG &&
             token.v.start_tag.is_self_closing);
 
-    has_error = !handle_token(&parser, &token) || has_error;
+    if (token.type == GUMBO_TOKEN_START_TAG && open_elements_full(&parser)) {
+      // Telegram fork: max_tree_depth.
+      parser_add_parse_error(&parser, &token);
+      ignore_token(&parser);
+      state->_self_closing_flag_acknowledged = true;
+      state->_reprocess_current_token = false;
+      has_error = true;
+    } else {
+      has_error = !handle_token(&parser, &token) || has_error;
+    }
 
     // Check for memory leaks when ownership is transferred from start tag
     // tokens to nodes.
@@ -4069,6 +4246,36 @@ GumboOutput* gumbo_parse_with_options(
     ++loop_count;
     assert(loop_count < 1000000000);
 
+    if (options->max_nodes >= 0 &&
+        state->_node_count >= (unsigned int) options->max_nodes) {
+      // Telegram fork: max_nodes. The token in hand was handled; the rest of
+      // the input is dropped as if it had ended here.
+      if (token.type != GUMBO_TOKEN_EOF && !state->_reprocess_current_token) {
+        parser._output->stopped_at_node_limit = true;
+        break;
+      }
+    }
+
+    if (options->max_total_attributes >= 0 &&
+        state->_attribute_count >= (unsigned int) options->max_total_attributes) {
+      // Telegram fork: max_total_attributes. As with max_nodes, the token in
+      // hand was handled and the rest of the input is dropped.
+      if (token.type != GUMBO_TOKEN_EOF && !state->_reprocess_current_token) {
+        parser._output->stopped_at_attribute_limit = true;
+        break;
+      }
+    }
+
+    if (options->max_total_attribute_bytes >= 0 &&
+        state->_attribute_bytes >= (size_t) options->max_total_attribute_bytes) {
+      // Telegram fork: max_total_attribute_bytes. As with max_nodes, the token
+      // in hand was handled and the rest of the input is dropped. It shares
+      // max_total_attributes' flag.
+      if (token.type != GUMBO_TOKEN_EOF && !state->_reprocess_current_token) {
+        parser._output->stopped_at_attribute_limit = true;
+        break;
+      }
+    }
   } while ((token.type != GUMBO_TOKEN_EOF || state->_reprocess_current_token) &&
            !(options->stop_on_first_error && has_error));
 

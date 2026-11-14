@@ -53,13 +53,17 @@ void gumbo_tag_from_original_text(GumboStringPiece* text) {
     // Start tag.
     text->data += 1;  // Move past <
     text->length -= 2;
-    // explicitly looking for whitespace or other illegal tag characters.
-    // see https://html.spec.whatwg.org/multipage/syntax.html#tag-name-state
-    for (const char* c = text->data; c != text->data + text->length; ++c) {
-      if (*c == ' ' || *c == '\t' || *c == '\n' || *c == '\f' || *c == '/') {
-        text->length = c - text->data;
-        break;
-      }
+  }
+  // explicitly looking for whitespace or other illegal tag characters.
+  // see https://html.spec.whatwg.org/multipage/syntax.html#tag-name-state
+  // Telegram fork (change 11): in end tags as in start tags (the tag name
+  // state ends both), and CR ends the name too: the source text is not
+  // newline-normalized, and the tokenizer reads a CR as LF.
+  for (const char* c = text->data; c != text->data + text->length; ++c) {
+    if (*c == ' ' || *c == '\t' || *c == '\n' || *c == '\r' || *c == '\f' ||
+        *c == '/') {
+      text->length = c - text->data;
+      break;
     }
   }
 }

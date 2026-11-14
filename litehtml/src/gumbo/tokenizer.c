@@ -770,7 +770,6 @@ static void add_duplicate_attr_error(GumboParser* parser, const char* attr_name,
   error->v.duplicate_attr.original_index = original_index;
   error->v.duplicate_attr.new_index = new_index;
   copy_over_tag_buffer(parser, &error->v.duplicate_attr.name);
-  reinitialize_tag_buffer(parser);
 }
 
 // Creates a new attribute in the current tag, copying the current tag buffer to
@@ -788,6 +787,15 @@ static bool finish_attribute_name(GumboParser* parser) {
   assert(tag_state->_attributes.capacity);
 
   GumboVector* /* GumboAttribute* */ attributes = &tag_state->_attributes;
+  int max_attributes = parser->_options->max_attributes;
+  if (max_attributes >= 0 && attributes->length >= (unsigned int) max_attributes) {
+    // Telegram fork: max_attributes. Dropped exactly as a duplicate is. The
+    // tag buffer is reset here: nothing else does it for a name without a
+    // value, and the next name would be appended to this one.
+    reinitialize_tag_buffer(parser);
+    tag_state->_drop_next_attr_value = true;
+    return false;
+  }
   for (unsigned int i = 0; i < attributes->length; ++i) {
     GumboAttribute* attr = attributes->data[i];
     if (strlen(attr->name) == tag_state->_buffer.length &&
@@ -795,6 +803,9 @@ static bool finish_attribute_name(GumboParser* parser) {
             tag_state->_buffer.length) == 0) {
       // Identical attribute; bail.
       add_duplicate_attr_error(parser, attr->name, i, attributes->length);
+      // Telegram fork: reset here, not inside add_duplicate_attr_error, which
+      // returns early when errors are not recorded (the default).
+      reinitialize_tag_buffer(parser);
       tag_state->_drop_next_attr_value = true;
       return false;
     }

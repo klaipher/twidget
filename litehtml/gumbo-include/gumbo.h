@@ -48,6 +48,7 @@
 #endif
 
 #include <stdbool.h>
+#include <stdint.h>
 #include <stddef.h>
 
 #ifdef __cplusplus
@@ -511,6 +512,19 @@ typedef struct {
    * order that they were parsed.  Pointers are owned.
    */
   GumboVector /* GumboAttribute* */ attributes;
+
+  /**
+   * Telegram fork: whether this element is on the parser's stack of open
+   * elements. Internal to the parser; false in a finished tree.
+   */
+  bool is_open;
+
+  /**
+   * Telegram fork: an order-independent hash of the attributes as parsed, so
+   * the Noah's Ark clause compares attribute sets in constant time unless
+   * they hash equal. Internal to the parser.
+   */
+  uint64_t attributes_hash;
 } GumboElement;
 
 /**
@@ -619,6 +633,52 @@ typedef struct GumboInternalOptions {
    * Default: GUMBO_NAMESPACE_HTML
    */
   GumboNamespaceEnum fragment_namespace;
+
+  /**
+   * Telegram fork: the deepest the stack of open elements may grow. A start
+   * tag that arrives while the stack holds this many elements is ignored as a
+   * parse error, and reconstructing the active formatting elements stops
+   * there. -1 for no limit. Default: 512.
+   */
+  int max_tree_depth;
+
+  /**
+   * Telegram fork: attributes past this many on one tag are dropped, like
+   * duplicates. -1 for no limit. Default: 256.
+   */
+  int max_attributes;
+
+  /**
+   * Telegram fork: parsing stops (as at the end of the input) once it has
+   * created this many nodes. -1 for no limit. Default: 100000.
+   */
+  int max_nodes;
+
+  /**
+   * Telegram fork: the most entries the list of active formatting elements
+   * may hold after its last scope marker. Adding one past it removes the
+   * earliest, as the Noah's Ark clause removes the earliest identical one.
+   * -1 for no limit. Default: 512.
+   */
+  int max_formatting_elements;
+
+  /**
+   * Telegram fork: parsing stops (as at the end of the input) once the
+   * elements the tree keeps hold this many attributes in all. Attributes are
+   * not nodes, so max_nodes does not bound them; this does. -1 for no limit.
+   * Default: -1.
+   */
+  int max_total_attributes;
+
+  /**
+   * Telegram fork: parsing stops (as at the end of the input) once the
+   * attribute strings the tree keeps (each name and value copy, NUL included)
+   * hold this many bytes in all. Reconstruction deep-copies a formatting
+   * element's attributes, so max_total_attributes, which counts attributes,
+   * does not bound their bytes; this does. Reported through
+   * stopped_at_attribute_limit. -1 for no limit. Default: -1.
+   */
+  int max_total_attribute_bytes;
 } GumboOptions;
 
 /** Default options struct; use this with gumbo_parse_with_options. */
@@ -646,6 +706,15 @@ typedef struct GumboInternalOutput {
    * reported so we can work out something appropriate for your use-case.
    */
   GumboVector /* GumboError */ errors;
+
+  /** Telegram fork: parsing stopped at options->max_nodes. */
+  bool stopped_at_node_limit;
+
+  /**
+   * Telegram fork: parsing stopped at options->max_total_attributes or
+   * options->max_total_attribute_bytes.
+   */
+  bool stopped_at_attribute_limit;
 } GumboOutput;
 
 /**
