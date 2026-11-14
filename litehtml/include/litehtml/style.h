@@ -8,6 +8,8 @@
 #include "gradient.h"
 #include "web_color.h"
 
+#include <functional>
+
 namespace litehtml
 {
     struct invalid
@@ -16,7 +18,6 @@ namespace litehtml
     struct inherit
     {
     }; // "inherit" was specified as the value of this property
-
     // "initial", "unset" or "revert": what they stand for depends on the element and the property, so
     // html_tag::get_property resolves them when it is read.
     struct css_wide_keyword
@@ -52,6 +53,15 @@ namespace litehtml
     bool      is_raw_declaration(string_id name);
     using props_map = std::map<string_id, property_value>;
 
+    // Telegram (VENDOR.md edit 79): what a declaration's parse read of the container's environment, which a change of it
+    // makes stale: a viewport unit folded to pixels (fold_math), and the colour scheme (edit 80).
+    constexpr int environment_viewport = 1;
+    constexpr int environment_scheme   = 2;
+    // Marks the declaration being parsed (style::add_property) as reading `bits` of the environment.
+    void note_environment(int bits);
+    // Whether a declaration's text may hold a viewport unit (edit 11's conservative scan).
+    bool text_may_hold_viewport_unit(const std::string& text);
+
     // represents a style block, eg. "color: black; display: inline"
     class style
     {
@@ -62,6 +72,7 @@ namespace litehtml
       private:
         props_map                              m_properties;
         int                                    m_counter = 0;
+        int                                    m_environment = 0; // Telegram (VENDOR.md edit 79)
         static std::map<string_id, css_values>& m_valid_values;
 
       public:
@@ -109,10 +120,31 @@ namespace litehtml
         }
 
         void combine(const style& src);
+        // Telegram (VENDOR.md edit 21): the heap a copy of this style's values holds (strings, string vectors, token
+        // vectors); fixed-size values hold none. What combine copies onto an element, which document::style_admit charges.
+        size_t payload_bytes() const;
+        // What combining this style onto `base` grows base's payload by: a value replacing one of the same property
+        // charges only what it holds beyond the one it replaces (a cascade of rules for one property holds one value).
+        size_t payload_growth_over(const style& base) const;
+        // For each property, raises `most` to the payload of this style's value: the most one element can keep of it.
+        void max_payload_into(std::map<string_id, size_t>& most) const;
+        // The heap payload of a token vector (what a var() splice of it copies).
+        static size_t token_payload_bytes(const css_token_vector& tokens);
+        // Counts the declarations holding var() and raises `largest_custom` to the largest custom property value.
+        void var_stats(size_t& var_uses, size_t& largest_custom) const;
+        // Combines only the properties whose values hold no heap payload (the rule past the style-byte budget).
+        void combine_fixed(const style& src);
         void clear()
         {
             m_properties.clear();
+            m_environment = 0;
         }
+        // Telegram (VENDOR.md edit 79): the environment its declarations' parses read (environment_* bits), its own and
+        // what combine brought.
+        int environment() const { return m_environment; }
+        // Telegram (VENDOR.md edit 80): marks it as reading `bits` of the environment outside a declaration's parse (an
+        // element's paint attribute that resolves light-dark() at draw).
+        void add_environment(int bits) { m_environment |= bits; }
 
         void subst_vars(const html_tag* el);
         void replace_properties(const std::vector<string_id>& names, const style& base, style& patch);
@@ -172,6 +204,11 @@ namespace litehtml
     template <typename Enum>
     bool parse_keyword(const css_token& tok, Enum& val, css_values keywords, int first_keyword_value = 0)
     {
+        // Telegram (VENDOR.md edit 31.3): only an identifier is a keyword (ident() is "" for any other token).
+        if(tok.type != IDENT)
+        {
+            return false;
+        }
         auto idx = keywords.value_index(tok.ident());
         if(!idx.has_value())
         {

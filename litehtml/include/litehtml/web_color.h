@@ -48,6 +48,8 @@ namespace litehtml
     };
 
     bool parse_color(const css_token& token, web_color& color, document_container* container);
+    // Telegram (VENDOR.md edit 13): the colour scheme the container reports (0 light, 1 dark); 0 without a container.
+    int container_color_scheme(document_container* container);
 } // namespace litehtml
 
 #endif // LITEHTML_WEB_COLOR_H

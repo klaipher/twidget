@@ -68,7 +68,12 @@ namespace litehtml
         css_line_height_t     m_line_height{{}, 0_px};
         list_style_type       m_list_style_type     = list_style_type_none;
         list_style_position   m_list_style_position = list_style_position_outside;
+#if 0
         std::string           m_list_style_image;
+#else
+        // Telegram (VENDOR.md edit 60): one string, shared by every element that inherits it.
+        std::shared_ptr<const std::string> m_list_style_image;
+#endif
         std::string           m_list_style_image_baseurl;
         background            m_bg;
         uint_ptr              m_font      = 0;
@@ -125,6 +130,8 @@ namespace litehtml
         css_length        m_word_spacing;
         std::string       m_font_variant_numeric;
         std::string       m_font_feature_settings;
+        // Telegram (VENDOR.md edit 32.4): inherited.
+        std::string       m_quotes;
         box_shadow_vector m_text_shadows;
         box_shadow_vector m_box_shadows;
         filter_vector     m_filter;
@@ -201,6 +208,8 @@ namespace litehtml
 
         int  get_z_index() const;
         void set_z_index(int mZIndex);
+        // Telegram (VENDOR.md edit 53): z-index as kept, auto included, for getComputedStyle.
+        const css_length& get_z_index_length() const { return m_z_index; }
 
         vertical_align get_vertical_align() const;
         void           set_vertical_align(vertical_align mVerticalAlign);
@@ -260,6 +269,11 @@ namespace litehtml
 
         const std::string& get_list_style_image() const;
         void               set_list_style_image(const std::string& url);
+        // Telegram (VENDOR.md edit 60): the shared string itself (null for none), for the elements that inherit it, and
+        // the charge of an inherited one over 1 KiB to `el`, held in a style shared from another element (dropped when
+        // the budget refuses it).
+        const std::shared_ptr<const std::string>& get_list_style_image_shared() const { return m_list_style_image; }
+        void               charge_inherited_list_style_image(const html_tag* el);
 
         const std::string& get_list_style_image_baseurl() const;
         void               set_list_style_image_baseurl(const std::string& url);
@@ -350,6 +364,8 @@ namespace litehtml
         }
         pixel_t                  get_letter_spacing() const { return pixel_t(m_letter_spacing.val()); }
         pixel_t                  get_word_spacing() const { return pixel_t(m_word_spacing.val()); }
+        // Telegram (VENDOR.md edit 32.4).
+        const std::string&       get_quotes() const { return m_quotes; }
         const box_shadow_vector& get_box_shadows() const { return m_box_shadows; }
         const filter_vector&     get_filter() const { return m_filter; }
         const filter_vector&     get_backdrop_filter() const { return m_backdrop_filter; }
@@ -642,13 +658,19 @@ namespace litehtml
         m_list_style_position = mListStylePosition;
     }
 
+#if 0
     inline const std::string& css_properties::get_list_style_image() const
     {
         return m_list_style_image;
     }
+#endif
     inline void css_properties::set_list_style_image(const std::string& url)
     {
+#if 0
         m_list_style_image = url;
+#else
+        m_list_style_image = url.empty() ? nullptr : std::make_shared<const std::string>(url);
+#endif
     }
 
     inline const std::string& css_properties::get_list_style_image_baseurl() const

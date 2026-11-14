@@ -8,10 +8,26 @@
 namespace litehtml
 {
 
+    // Telegram (VENDOR.md edit 14): blocks and functions nest at most this deep, the same bound as WidgetRuntime's
+    // selector pre-walk (kMaxBracketDepth).
+    constexpr int max_component_depth = 64;
+
+    // Telegram (VENDOR.md edit 15): list-valued CSS keeps this many entries; later ones are dropped at parse. Layers:
+    // background layers, box-shadow and text-shadow entries.
+    constexpr size_t max_css_layers = 8;
+    // Telegram (VENDOR.md edit 15, Ruling E12): filter, backdrop-filter and transform functions.
+    constexpr size_t max_css_functions = 8;
+    // Telegram (VENDOR.md edit 15): gradient colour stops, clip-path polygon points.
+    constexpr size_t max_css_list = 32;
+
     class css_parser
     {
         css_token_vector m_tokens;
         int              m_index = 0;
+        // Telegram (VENDOR.md edit 14): blocks and functions open right now.
+        int              m_depth = 0;
+        // Telegram (VENDOR.md edit 14): consumes up to the closer of the block just opened, without recursing.
+        void skip_block(char closing);
 
         css_token next_token();
         css_token peek_token();

@@ -504,7 +504,15 @@ litehtml::rendered_width litehtml::render_item_table::_render(pixel_t x, pixel_t
         // Move table cells to the bottom side
         for(int row = 0; row < m_grid->rows_count(); row++)
         {
+#if 0
             m_grid->row(row).el_row->pos().y += top_captions;
+#else
+            // Telegram (VENDOR.md edits 18 and 59): nothing else places a row, so it is placed once per layout, not shifted
+            // again by every layout of a kept render tree (a patch's). Its cells' positions are the table's and carry the
+            // captions' height (drawing reads them so), so the row stays at the table's top: moved too, every placement and
+            // hit test that adds a row's position to its cells' counted the captions twice.
+            m_grid->row(row).el_row->pos().y = 0_px;
+#endif
             for(int col = 0; col < m_grid->cols_count(); col++)
             {
                 table_cell* cell = m_grid->cell(col, row);
@@ -575,6 +583,7 @@ std::shared_ptr<litehtml::render_item> litehtml::render_item_table::init()
     }
 
     m_grid->finish();
+    m_cells_taken += m_grid->cells_taken(); // Telegram (VENDOR.md edit 74)
 
     if(src_el()->css().get_border_collapse() == border_collapse_separate)
     {
@@ -621,7 +630,11 @@ void litehtml::render_item_table::draw_children(uint_ptr hdc, pixel_t x, pixel_t
         if(flag == draw_block)
         {
             if(g_paint_trace) g_paint_trace->push_back(caption.get());
+#if 0
             caption->src_el()->draw(hdc, pos.x, pos.y, clip, caption);
+#else
+            paint_or_visit(caption, flag, hdc, pos.x, pos.y, clip);   // Telegram (VENDOR.md edit 20)
+#endif
         }
         caption->draw_children(hdc, pos.x, pos.y, clip, flag, zindex);
     }
@@ -630,7 +643,11 @@ void litehtml::render_item_table::draw_children(uint_ptr hdc, pixel_t x, pixel_t
         const bool row_visible = m_grid->row(row).el_row->is_visible();
         if(row_visible && flag == draw_block)
         {
+#if 0
             m_grid->row(row).el_row->src_el()->draw_background(hdc, pos.x, pos.y, clip, m_grid->row(row).el_row);
+#else
+            paint_or_visit(m_grid->row(row).el_row, flag, hdc, pos.x, pos.y, clip, true);   // Telegram (VENDOR.md edit 20)
+#endif
         }
         for(int col = 0; col < m_grid->cols_count(); col++)
         {
@@ -646,7 +663,7 @@ void litehtml::render_item_table::draw_children(uint_ptr hdc, pixel_t x, pixel_t
                     if(g_paint_trace) g_paint_trace->push_back(cell->el.get());
                     const bool deferred = cell->el->defer_borders;
                     cell->el->defer_borders = collapsed;
-                    cell->el->src_el()->draw(hdc, pos.x, pos.y, clip, cell->el);
+                    paint_or_visit(cell->el, flag, hdc, pos.x, pos.y, clip);   // Telegram (VENDOR.md edit 20)
                     cell->el->defer_borders = deferred;
                 }
                 cell->el->draw_children(hdc, pos.x, pos.y, clip, flag, zindex);
@@ -710,6 +727,43 @@ void litehtml::render_item_table::add_children_ink(uint32_t generation, paint_in
             }
         }
     }
+}
+
+bool litehtml::render_item_table::part_placement(const element* part, position& out) const
+{
+    if(!m_grid || !part || m_grid->cols_count() == 0)
+    {
+        return false;
+    }
+    bool     found = false;
+    pixel_t  top, bottom;
+    position origin;
+    for(int r = 0; r < m_grid->rows_count(); r++)
+    {
+        const table_row& row = m_grid->row(r);
+        if(!row.el_row || (row.el_row->src_el().get() != part && row.el_row->src_el()->parent().get() != part))
+        {
+            continue;
+        }
+        if(!found)
+        {
+            // The cells' positions are the table's, and a cell is placed through its row (render_item::get_placement).
+            origin = row.el_row->get_placement();
+            top    = row.top;
+            found  = true;
+        }
+        bottom = row.bottom;
+    }
+    if(!found)
+    {
+        return false;
+    }
+    const pixel_t left = m_grid->column(0).left;
+    out.x      = origin.x + left;
+    out.y      = origin.y + top + m_grid->top_captions_height();
+    out.width  = m_grid->column(m_grid->cols_count() - 1).right - left;
+    out.height = bottom - top;
+    return true;
 }
 
 litehtml::pixel_t litehtml::render_item_table::get_draw_vertical_offset()

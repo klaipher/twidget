@@ -343,6 +343,34 @@ namespace litehtml
 
     char mirror(char c);
 
+    // Telegram (VENDOR.md edit 14): consume tokens up to the closer of the block just opened, by a bracket count. The
+    // componentizer's rules, without its recursion: a function or an opening bracket opens a block; a closing token
+    // closes only the innermost block, and only when it is that block's own kind; the end of input closes every block.
+    void css_parser::skip_block(char closing)
+    {
+        std::vector<char> closers;
+        closers.push_back(closing);
+        while(!closers.empty())
+        {
+            css_token token = next_token();
+            if(token.type == EOF)
+            {
+                css_parse_error("eof in simple block");
+                return;
+            }
+            if(token.type == closers.back())
+            {
+                closers.pop_back();
+            } else if(token.type == '{' || token.type == '[' || token.type == '(')
+            {
+                closers.push_back(mirror(static_cast<char>(token.ch)));
+            } else if(token.type == FUNCTION)
+            {
+                closers.push_back(')');
+            }
+        }
+    }
+
     // https://www.w3.org/TR/css-syntax-3/#consume-simple-block
     css_token css_parser::consume_simple_block(char opening_bracket)
     {
@@ -352,6 +380,19 @@ namespace litehtml
         css_token block(block_type);
 
         char closing_bracket = mirror(opening_bracket);
+
+        // Telegram (VENDOR.md edit 14): a block that would open past the bound is not recursed into.
+        if(m_depth >= max_component_depth)
+        {
+            skip_block(closing_bracket);
+            return block;
+        }
+        struct depth_guard
+        {
+            int& d;
+            explicit depth_guard(int& v) : d(v) { d++; }
+            ~depth_guard() { d--; }
+        } depth_guard_(m_depth); // Telegram (VENDOR.md edit 14)
 
         while(true)
         {
@@ -404,6 +445,19 @@ namespace litehtml
         // Create a function with its name equal to the value of the current input token and with its value initially
         // set to an empty list.
         css_token function(CV_FUNCTION, name);
+
+        // Telegram (VENDOR.md edit 14): a function that would open past the bound is not recursed into.
+        if(m_depth >= max_component_depth)
+        {
+            skip_block(')');
+            return function;
+        }
+        struct depth_guard
+        {
+            int& d;
+            explicit depth_guard(int& v) : d(v) { d++; }
+            ~depth_guard() { d--; }
+        } depth_guard_(m_depth); // Telegram (VENDOR.md edit 14)
 
         while(true)
         {

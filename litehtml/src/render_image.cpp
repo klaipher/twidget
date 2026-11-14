@@ -147,6 +147,16 @@ litehtml::rendered_width litehtml::render_item_image::_render(pixel_t x, pixel_t
 
     rendered_width ret;
     ret.natural_width = ret.min_width = m_pos.width + content_offset_left() + content_offset_right();
+    // Telegram (VENDOR.md edit 68): a replaced element sized by a percentage width or max-width is compressible (CSS
+    // Sizing 3 §5.2.2): its min-content contribution resolves the percentage against zero, so a mark at 58 % of its
+    // grid cell does not widen the cell's track to 58 % of the grid.
+    const css_length& width     = src_el()->css().get_width();
+    const css_length& max_width = src_el()->css().get_max_width();
+    if((!width.is_predefined() && width.units() == css_units_percentage) ||
+       (!max_width.is_predefined() && max_width.units() == css_units_percentage))
+    {
+        ret.min_width = content_offset_left() + content_offset_right();
+    }
 
     return ret;
 }

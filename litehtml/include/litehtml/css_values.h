@@ -171,7 +171,8 @@ namespace litehtml
     // ==========================================================
     // CSS Property: list-style-type
     // ==========================================================
-    inline constexpr auto list_style_type_strings = split_css_values<24>(
+    // Telegram (VENDOR.md edit 31.3): exactly its names; a spare, empty slot matched a URL token's empty ident().
+    inline constexpr auto list_style_type_strings = split_css_values<23>(
         "none;circle;disc;square;disclosure-open;disclosure-closed;armenian;cjk-ideographic;decimal;decimal-leading-zero;georgian;hebrew;hiragana;"
         "hiragana-iroha;katakana;katakana-iroha;lower-alpha;lower-greek;lower-latin;lower-roman;upper-alpha;"
         "upper-latin;upper-roman");
@@ -556,6 +557,16 @@ namespace litehtml
         word_break_break_word
     };
 
+    // Telegram (VENDOR.md edit 39): the predefined values of width and height; every one but auto sizes a block to its
+    // content (render_item_block::_render), and anything else reads them as auto.
+    enum width_keyword
+    {
+        width_auto,
+        width_min_content,
+        width_max_content,
+        width_fit_content
+    };
+
     inline constexpr auto resize_strings = split_css_values<6>("none;both;horizontal;vertical;block;inline");
 
     enum resize
@@ -571,7 +582,12 @@ namespace litehtml
     // ==========================================================
     // CSS Property: appearance
     // ==========================================================
+#if 0
     inline constexpr auto appearance_strings = split_css_values<17>(
+#else
+    // Telegram (VENDOR.md edit 31.3): 16 names.
+    inline constexpr auto appearance_strings = split_css_values<16>(
+#endif
         "none;auto;menulist-button;textfield;button;checkbox;listbox;menulist;meter;progress-bar;push-button;radio;"
         "searchfield;slider-horizontal;square-button;textarea");
 

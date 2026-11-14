@@ -5,6 +5,7 @@
 #include "css_parser.h"
 #include "os_types.h"
 #include "document_container.h"
+#include "style.h"
 
 namespace litehtml
 {
@@ -524,8 +525,71 @@ namespace litehtml
     }
 
     // https://drafts.csswg.org/css-color-5/#typedef-color
+    // Telegram (VENDOR.md edit 13): the colour scheme the container reports.
+    int container_color_scheme(document_container* container)
+    {
+        if(!container)
+        {
+            return 0;
+        }
+        media_features media;
+        container->get_media_features(media);
+        return media.color_scheme || media.dark_color_scheme ? 1 : 0;
+    }
+
+    // Telegram (VENDOR.md edit 13): light-dark(<color>, <color>) is the scheme's branch. Nested ones resolve; anything
+    // but two comma-separated colours is not a colour.
+    static bool parse_light_dark_color(const css_token& tok, web_color& color, document_container* container)
+    {
+        if(tok.type != CV_FUNCTION || lowcase(tok.name()) != "light-dark")
+        {
+            return false;
+        }
+        auto list = parse_comma_separated_list(tok.value);
+        if(list.size() != 2)
+        {
+            return false;
+        }
+        css_token branch[2];
+        for(int i = 0; i < 2; i++)
+        {
+            int count = 0;
+            for(const auto& item : list[i])
+            {
+                if(item.type == WHITESPACE)
+                {
+                    continue;
+                }
+                if(count++)
+                {
+                    return false;
+                }
+                branch[i] = item;
+            }
+            if(count != 1)
+            {
+                return false;
+            }
+        }
+        // Both branches must be colours, whichever one applies.
+        web_color first, second;
+        if(!parse_color(branch[0], first, container) || !parse_color(branch[1], second, container))
+        {
+            return false;
+        }
+        if(container)
+            note_environment(environment_scheme); // Telegram (VENDOR.md edit 80)
+        color = container_color_scheme(container) ? second : first;
+        return true;
+    }
+
     bool parse_color(const css_token& tok, web_color& color, document_container* container)
     {
+        // Telegram (VENDOR.md edit 13)
+        if(parse_light_dark_color(tok, color, container))
+        {
+            return true;
+        }
         return parse_hash_color(tok, color) || parse_func_color(tok, color) || parse_name_color(tok, color, container);
     }
 

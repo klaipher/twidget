@@ -252,6 +252,11 @@ namespace litehtml
                 return false;
             }
         }
+        // Telegram (VENDOR.md edit 15): later stops are dropped.
+        if(grad.m_colors.size() > max_css_list)
+        {
+            grad.m_colors.erase(grad.m_colors.begin() + max_css_list, grad.m_colors.end());
+        }
         return true;
     }
 

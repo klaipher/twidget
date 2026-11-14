@@ -1,14 +1,19 @@
 #include "render_item.h"
 #include "render_inline_context.h"
+// Telegram (VENDOR.md edit 20): a table's rows and parts, which layout places without render().
+#include "render_table.h"
 #include "document.h"
 #include "document_container.h"
 #include "types.h"
 #include <algorithm>
+#include <cmath>
 #include <functional>
 #include <set>
 #include <typeinfo>
 
 thread_local std::vector<const litehtml::render_item*>* litehtml::g_paint_trace = nullptr;
+// Telegram (VENDOR.md edit 20): the walk's visitor, while walk_paint_order or with_paint_visitor runs on this thread.
+thread_local litehtml::paint_visitor* litehtml::g_paint_visitor = nullptr;
 
 void litehtml::render_item::draw_borders(uint_ptr hdc, position border_box) const
 {
@@ -141,6 +146,9 @@ bool litehtml::render_item::layout_cacheable(formatting_context* fmt_ctx) const
     const document* doc = src_el()->doc_ptr();
     if(!doc || !doc->layout_cache_enabled() || m_out_of_flow)
         return false;
+    // Telegram (VENDOR.md edit 39): a measuring pass lays nested keyword boxes out as auto, which no later pass may reuse.
+    if(doc->intrinsic_measuring() > 0)
+        return false;
     const element_position position = css().get_position();
     if(position == element_position_absolute || position == element_position_fixed)
         return false;
@@ -213,6 +221,8 @@ litehtml::rendered_width litehtml::render_item::render(pixel_t x, pixel_t y,
                                                        const containing_block_context& containing_block_size,
                                                        formatting_context* fmt_ctx, bool second_pass)
 {
+    // Telegram (VENDOR.md edit 20): the box before this layout writes it, for the render observer.
+    observe_geometry();
     const bool cacheable = layout_cacheable(fmt_ctx);
     document*  doc       = src_el()->doc_ptr();
     if(doc && m_layout_epoch != doc->layout_epoch())
@@ -386,6 +396,20 @@ litehtml::pixel_t litehtml::render_item::calc_auto_margins(pixel_t parent_width)
                 m_pos.width + m_borders.left + m_borders.right + m_padding.left + m_padding.right + m_margins.left;
             m_margins.right = parent_width - el_width;
             m_margins.right = std::max<pixel_t>(m_margins.right, 0_px);
+        }
+        // Telegram (VENDOR.md edit 46): over-constrained (neither margin auto) in a right-to-left containing block,
+        // margin-left is the one ignored (CSS 2.1 §10.3.3): the box ends at the right margin. The shift is returned.
+        if(!src_el()->css().get_margins().left.is_predefined() && !src_el()->css().get_margins().right.is_predefined())
+        {
+            const auto parent = src_el()->parent();
+            if(parent && parent->css().get_direction() == direction_rtl)
+            {
+                const pixel_t used =
+                    m_pos.width + m_borders.left + m_borders.right + m_padding.left + m_padding.right + m_margins.left + m_margins.right;
+                const pixel_t shift = parent_width - used;
+                m_margins.left += shift;
+                return shift;
+            }
         }
     }
     return 0_px;
@@ -1238,6 +1262,9 @@ void litehtml::render_item::calc_document_size(litehtml::size& sz, pixel_t x /*=
 void litehtml::render_item::draw_stacking_context(uint_ptr hdc, pixel_t x, pixel_t y, const position* clip,
                                                   bool with_positioned)
 {
+    // Telegram (VENDOR.md edit 20): a painting context, for the walk's visitor.
+    const paint_context_scope context_scope(this, !parent() ? paint_context::root
+                                                            : (with_positioned ? paint_context::stacking : paint_context::pseudo));
     if(!is_visible())
     {
         return;
@@ -1324,6 +1351,12 @@ static litehtml::transform_matrix group_transform(const litehtml::css_properties
         }
         m = m.then(f);
     }
+    // Telegram: finite factors can still compose to a non-finite matrix (scale(1e20) scale(1e20)), as can a
+    // percentage or a transform-origin resolved against the box here. Such a transform is unset: identity.
+    const transform_matrix composed = m.then(transform_matrix{1, 0, 0, 1, ox.value(), oy.value()});
+    if(!std::isfinite(composed.a) || !std::isfinite(composed.b) || !std::isfinite(composed.c) ||
+       !std::isfinite(composed.d) || !std::isfinite(composed.tx) || !std::isfinite(composed.ty))
+        return transform_matrix();
     return m.then(transform_matrix{1, 0, 0, 1, ox.value(), oy.value()});
 }
 
@@ -1497,6 +1530,8 @@ namespace
 void litehtml::render_item::draw_group(uint_ptr hdc, pixel_t x, pixel_t y, const position* clip,
                                        const std::shared_ptr<render_item>& el)
 {
+    // Telegram (VENDOR.md edit 20): a paint group is a painting context, for the walk's visitor.
+    const paint_context_scope group_scope(el.get(), paint_context::group);
     const auto& el_css     = el->src_el()->css();
     const auto sticky = el->sticky_offset();
     x += sticky.x;
@@ -1605,12 +1640,20 @@ void litehtml::render_item::draw_group(uint_ptr hdc, pixel_t x, pixel_t y, const
             paint.bounds = position(pixel_t(ink.l) + x, pixel_t(ink.t) + y, pixel_t(ink.r - ink.l), pixel_t(ink.b - ink.t));
         }
         container->draw_filtered(hdc, paint, [&](uint_ptr target) {
+#if 0
             el->src_el()->draw(target, x, y, nullptr, el);
+#else
+            paint_or_visit(el, draw_root, target, x, y, nullptr);   // Telegram (VENDOR.md edit 20)
+#endif
             draw_group_contents(el, target, x, y, nullptr);
         });
     } else
     {
+#if 0
         el->src_el()->draw(hdc, x, y, inner_clip, el);
+#else
+        paint_or_visit(el, draw_root, hdc, x, y, inner_clip);   // Telegram (VENDOR.md edit 20)
+#endif
         draw_group_contents(el, hdc, x, y, inner_clip);
     }
     if(shaped) container->del_clip();
@@ -1620,6 +1663,8 @@ void litehtml::render_item::draw_group(uint_ptr hdc, pixel_t x, pixel_t y, const
 void litehtml::render_item::draw_children(uint_ptr hdc, pixel_t x, pixel_t y, const position* clip, draw_flag flag,
                                           int zindex)
 {
+    // Telegram (VENDOR.md edit 20): a pass of this item's children, for the walk's visitor.
+    const paint_pass_scope pass_scope(this, flag, zindex);
     document* doc = src_el()->doc_ptr();
     if(!doc->skip_scroll_content.empty() && doc->skip_scroll_content.count(src_el().get()))
     {
@@ -1710,14 +1755,22 @@ void litehtml::render_item::draw_children(uint_ptr hdc, pixel_t x, pixel_t y, co
                         const bool escape = !inside_paint_group(el);
                         if(escape)
                             doc->container()->suspend_clips();
+#if 0
                         el->src_el()->draw(hdc, 0_px, 0_px, clip, el);
+#else
+                        paint_or_visit(el, flag, hdc, 0_px, 0_px, clip);   // Telegram (VENDOR.md edit 20)
+#endif
                         el->draw_stacking_context(hdc, 0_px, 0_px, clip, true);
                         if(escape)
                             doc->container()->resume_clips();
                     } else
                     {
                         if(g_paint_trace) g_paint_trace->push_back(el.get());
+#if 0
                         el->src_el()->draw(hdc, pos.x, pos.y, clip, el);
+#else
+                        paint_or_visit(el, flag, hdc, pos.x, pos.y, clip);   // Telegram (VENDOR.md edit 20)
+#endif
                         el->draw_stacking_context(hdc, pos.x, pos.y, clip, true);
                     }
                     process = false;
@@ -1728,14 +1781,22 @@ void litehtml::render_item::draw_children(uint_ptr hdc, pixel_t x, pixel_t y, co
                    !el->src_el()->is_positioned())
                 {
                     if(g_paint_trace) g_paint_trace->push_back(el.get());
+#if 0
                     el->src_el()->draw(hdc, pos.x, pos.y, clip, el);
+#else
+                    paint_or_visit(el, flag, hdc, pos.x, pos.y, clip);   // Telegram (VENDOR.md edit 20)
+#endif
                 }
                 break;
             case draw_floats:
                 if(el->src_el()->css().get_float() != float_none && !el->src_el()->is_positioned())
                 {
                     if(g_paint_trace) g_paint_trace->push_back(el.get());
+#if 0
                     el->src_el()->draw(hdc, pos.x, pos.y, clip, el);
+#else
+                    paint_or_visit(el, flag, hdc, pos.x, pos.y, clip);   // Telegram (VENDOR.md edit 20)
+#endif
                     el->draw_stacking_context(hdc, pos.x, pos.y, clip, false);
                     process = false;
                 }
@@ -1745,7 +1806,11 @@ void litehtml::render_item::draw_children(uint_ptr hdc, pixel_t x, pixel_t y, co
                    !el->src_el()->is_positioned())
                 {
                     if(g_paint_trace) g_paint_trace->push_back(el.get());
+#if 0
                     el->src_el()->draw(hdc, pos.x, pos.y, clip, el);
+#else
+                    paint_or_visit(el, flag, hdc, pos.x, pos.y, clip);   // Telegram (VENDOR.md edit 20)
+#endif
                     if(el->src_el()->css().get_display() == display_inline_block ||
                        el->src_el()->css().get_display() == display_inline_flex ||
                        el->src_el()->css().get_display() == display_inline_grid)
@@ -1769,8 +1834,13 @@ void litehtml::render_item::draw_children(uint_ptr hdc, pixel_t x, pixel_t y, co
                     }
                 } else
                 {
+                    // Telegram (VENDOR.md edit 86): an inline-flex or inline-grid paints its children in its own context
+                    // (draw_inlines above), as an inline-block does; this pass reaching them again painted its
+                    // blockified items twice.
                     if(el->src_el()->css().get_float() == float_none &&
-                       el->src_el()->css().get_display() != display_inline_block && !el->src_el()->is_positioned())
+                       el->src_el()->css().get_display() != display_inline_block &&
+                       el->src_el()->css().get_display() != display_inline_flex &&
+                       el->src_el()->css().get_display() != display_inline_grid && !el->src_el()->is_positioned())
                     {
                         el->draw_children(hdc, pos.x, pos.y, clip, flag, zindex);
                     }
@@ -2472,4 +2542,264 @@ std::tuple<litehtml::pixel_t, litehtml::pixel_t> litehtml::render_item::element_
 void litehtml::render_item::y_shift(pixel_t delta)
 {
     m_pos.y += delta;
+}
+
+// Telegram (VENDOR.md edit 20): the render observer's layout bookkeeping and the paint walk.
+namespace
+{
+    // An inline context's inline content as layout leaves it: every inline item under it in order (through spans, not
+    // into inline boxes, whose content is their own), each item's box, its inline boxes and a text's fragments, with
+    // counts between so two different shapes never read as one.
+    void inline_geometry(const litehtml::render_item& context, std::vector<litehtml::position>& out)
+    {
+        out.clear();
+        std::vector<const litehtml::render_item*> stack;
+        // children() has no const overload; nothing here changes the tree.
+        const auto& top = const_cast<litehtml::render_item&>(context).children();
+        for(auto it = top.rbegin(); it != top.rend(); ++it)
+            stack.push_back(it->get());
+        while(!stack.empty())
+        {
+            const litehtml::render_item* item = stack.back();
+            stack.pop_back();
+            out.push_back(item->pos_const());
+            size_t marker = out.size();
+            out.emplace_back();
+            int boxes = 0;
+            item->for_inline_boxes([&](const litehtml::position& box, bool, bool) {
+                out.push_back(box);
+                boxes++;
+                return true;
+            });
+            out[marker] = litehtml::position(litehtml::pixel_t(float(boxes)), 0, 0, 0);
+            if(const auto* text = dynamic_cast<const litehtml::render_text*>(item))
+            {
+                out.emplace_back(litehtml::pixel_t(float(text->fragments.size())), 0, 0, 0);
+                for(const auto& fragment : text->fragments)
+                    out.push_back(fragment->pos_const());
+            }
+            if(dynamic_cast<const litehtml::render_item_inline*>(item) && !item->src_el()->is_inline_box())
+            {
+                const auto& kids = const_cast<litehtml::render_item*>(item)->children();
+                for(auto it = kids.rbegin(); it != kids.rend(); ++it)
+                    stack.push_back(it->get());
+            }
+        }
+    }
+
+    // Telegram (VENDOR.md edit 20): values compared exactly, not within litehtml's pixel epsilon: a layout on a kept render
+    // tree can move a box by less than it, and what the mirror holds must be what a fresh walk records.
+    bool same(litehtml::pixel_t a, litehtml::pixel_t b)
+    {
+        return a.value() == b.value();
+    }
+
+    bool same_position(const litehtml::position& a, const litehtml::position& b)
+    {
+        return same(a.x, b.x) && same(a.y, b.y) && same(a.width, b.width) && same(a.height, b.height);
+    }
+
+    bool same_margins(const litehtml::margins& a, const litehtml::margins& b)
+    {
+#if 0
+        return a.left == b.left && a.right == b.right && a.top == b.top && a.bottom == b.bottom;
+#else
+        return same(a.left, b.left) && same(a.right, b.right) && same(a.top, b.top) && same(a.bottom, b.bottom);
+#endif
+    }
+} // namespace
+
+void litehtml::render_item::observe_geometry()
+{
+    document* doc = src_el()->doc_ptr();
+    if(!doc || !doc->get_render_observer() || m_observed_epoch == doc->observe_epoch())
+        return;
+    m_observed_epoch   = doc->observe_epoch();
+    m_observed_pos     = m_pos;
+    m_observed_padding = m_padding;
+    m_observed_borders = m_borders;
+    if(dynamic_cast<const render_item_inline_context*>(this))
+        inline_geometry(*this, m_observed_inline);
+    else
+        m_observed_inline.clear();
+    doc->note_observed(this);
+    // A table's layout places its row groups and rows without rendering them.
+    if(dynamic_cast<const render_item_table*>(this))
+    {
+        std::vector<render_item*> parts;
+        for(const auto& child : m_children)
+            parts.push_back(child.get());
+        while(!parts.empty())
+        {
+            render_item* part = parts.back();
+            parts.pop_back();
+            if(!dynamic_cast<render_item_table_part*>(part) && !dynamic_cast<render_item_table_row*>(part))
+                continue;
+            part->observe_geometry();
+            for(const auto& child : part->children())
+                parts.push_back(child.get());
+        }
+    }
+}
+
+unsigned litehtml::render_item::observed_change() const
+{
+    unsigned what = 0;
+    if(!same(m_observed_pos.x, m_pos.x) || !same(m_observed_pos.y, m_pos.y))
+        what |= render_observer::moved;
+    if(!same(m_observed_pos.width, m_pos.width) || !same(m_observed_pos.height, m_pos.height) ||
+       !same_margins(m_observed_padding, m_padding) || !same_margins(m_observed_borders, m_borders))
+        what |= render_observer::resized;
+    if(dynamic_cast<const render_item_inline_context*>(this))
+    {
+        std::vector<position> now;
+        inline_geometry(*this, now);
+        if(now.size() != m_observed_inline.size() || !std::equal(now.begin(), now.end(), m_observed_inline.begin(), same_position))
+            what |= render_observer::reflowed;
+    }
+    return what;
+}
+
+void litehtml::walk_paint_order(document& doc, paint_visitor& visitor, uint_ptr hdc, pixel_t x, pixel_t y)
+{
+    with_paint_visitor(visitor, [&]() { doc.draw(hdc, x, y, nullptr); });
+}
+
+void litehtml::with_paint_visitor(paint_visitor& visitor, const std::function<void()>& run)
+{
+    struct restore
+    {
+        paint_visitor* saved;
+        ~restore() { g_paint_visitor = saved; }
+    } restore_visitor{g_paint_visitor};
+    g_paint_visitor = &visitor;
+    run();
+}
+
+void litehtml::paint_or_visit(const std::shared_ptr<render_item>& item, draw_flag pass, uint_ptr hdc, pixel_t x,
+                              pixel_t y, const position* clip, bool background)
+{
+    paint_visitor* visitor = g_paint_visitor;
+    if(!visitor)
+    {
+        if(background)
+            item->src_el()->draw_background(hdc, x, y, clip, item);
+        else
+            item->src_el()->draw(hdc, x, y, clip, item);
+        return;
+    }
+    // The paint itself is draw()'s, with no visitor installed while it runs.
+    visitor->paint_element(item, pass, x, y, [&]() {
+        struct restore
+        {
+            paint_visitor* saved;
+            ~restore() { g_paint_visitor = saved; }
+        } restore_visitor{g_paint_visitor};
+        g_paint_visitor = nullptr;
+        if(background)
+            item->src_el()->draw_background(hdc, x, y, clip, item);
+        else
+            item->src_el()->draw(hdc, x, y, clip, item);
+    });
+}
+
+litehtml::paint_context_scope::paint_context_scope(render_item* item, paint_context kind)
+{
+    if(paint_visitor* v = g_paint_visitor)
+    {
+        v->open_context(item->shared_from_this(), kind);
+        visitor = v;
+    }
+}
+
+litehtml::paint_context_scope::~paint_context_scope()
+{
+    if(visitor)
+        visitor->close_context();
+}
+
+litehtml::paint_pass_scope::paint_pass_scope(render_item* item, draw_flag pass, int zindex)
+{
+    if(paint_visitor* v = g_paint_visitor)
+    {
+        v->open_pass(item->shared_from_this(), pass, zindex);
+        visitor = v;
+    }
+}
+
+litehtml::paint_pass_scope::~paint_pass_scope()
+{
+    if(visitor)
+        visitor->close_pass();
+}
+
+void litehtml::paint_origin(const render_item& item, pixel_t& x, pixel_t& y, bool before_sticky)
+{
+    std::vector<const render_item*> chain;
+    for(const render_item* at = &item; at;)
+    {
+        chain.push_back(at);
+        const auto parent = at->parent();
+        at = parent.get();
+    }
+    // The root paints at (0, 0) (document::draw); each step down is the x, y the parent's draw_children (or the
+    // table's, or draw_group) hands the child, in the same arithmetic.
+    x = 0_px;
+    y = 0_px;
+    for(size_t i = chain.size() - 1; i > 0; i--)
+    {
+        const render_item* parent = chain[i];
+        const render_item* child  = chain[i - 1];
+        pixel_t cx = x;
+        pixel_t cy = y;
+        if(dynamic_cast<const render_item_table*>(parent))
+        {
+            position pos  = parent->pos_const();
+            pos.x        += x;
+            pos.y        += y;
+            cx            = pos.x;
+            cy            = pos.y;
+        } else if(!dynamic_cast<const render_item_table_part*>(parent) && !dynamic_cast<const render_item_table_row*>(parent))
+        {
+            position pos  = parent->pos_const();
+            pos.x        += x - parent->get_scroll_left();
+            pos.y        += y - parent->get_scroll_top();
+            cx            = pos.x;
+            cy            = pos.y;
+        }
+        const auto& child_css = child->src_el()->css();
+        if(child_css.get_position() == element_position_fixed)
+        {
+            cx = 0_px;
+            cy = 0_px;
+        }
+        if(child_css.is_paint_group() && !(before_sticky && i == 1))
+        {
+            const auto sticky = child->sticky_offset();
+            cx += sticky.x;
+            cy += sticky.y;
+        }
+        x = cx;
+        y = cy;
+    }
+}
+
+bool litehtml::paint_clip(const render_item& item, pixel_t x, pixel_t y, position& box, border_radiuses& radius)
+{
+    const document* doc = item.src_el()->doc_ptr();
+    if(!item.src_el()->css().clips_contents() || (doc && item.src_el().get() == doc->unclipped_scroll) ||
+       item.src_el()->css().get_display() == display_inline)
+        return false;
+    position clip_box    = item.pos_const();
+    clip_box.x          += x;
+    clip_box.y          += y;
+    clip_box            += item.get_paddings_const();
+    position border_box  = clip_box;
+    border_box          += item.get_borders_const();
+    border_radiuses bdr_radius =
+        item.src_el()->css().get_borders().radius.calc_percents(border_box.width, border_box.height);
+    bdr_radius -= item.get_borders_const();
+    box    = clip_box;
+    radius = bdr_radius;
+    return true;
 }

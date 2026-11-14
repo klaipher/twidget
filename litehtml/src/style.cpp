@@ -112,6 +112,15 @@ namespace litehtml
 
         {_flex_,            {_flex_grow_, _flex_shrink_, _flex_basis_}                                                },
         {_flex_flow_,       {_flex_direction_, _flex_wrap_}                                                           },
+        // Telegram (VENDOR.md edit 55): the box alignment shorthands, so a CSS-wide keyword reaches their longhands and
+        // a longhand written after one holding a var() stands once it is substituted.
+        {_gap_,             {_row_gap_, _column_gap_}                                                                 },
+        {_grid_gap_,        {_row_gap_, _column_gap_}                                                                 },
+        {_place_content_,   {_align_content_, _justify_content_}                                                      },
+        {_place_items_,     {_align_items_, _justify_items_}                                                          },
+        {_place_self_,      {_align_self_, _justify_self_}                                                            },
+        // Telegram (VENDOR.md edit 66): grid-template's rows and columns.
+        {_grid_template_,   {_grid_template_rows_, _grid_template_columns_}                                           },
 
         {_text_decoration_,
          {_text_decoration_color_, _text_decoration_line_, _text_decoration_style_, _text_decoration_thickness_}      },
@@ -139,8 +148,44 @@ namespace litehtml
             return next == ':' || isspace(static_cast<unsigned char>(next));
         }
 
+        // Telegram (VENDOR.md edit 11): whether a declaration's text may hold a viewport unit (vw, vh, vmin, vmax and
+        // their s/l/d variants); a false positive only costs a cache entry per viewport.
+        static bool declaration_may_hold_viewport_unit(const std::string& text)
+        {
+            for(size_t i = 0; i + 1 < text.size(); i++)
+            {
+                if((text[i] == 'v' || text[i] == 'V') && i > 0)
+                {
+                    const char next = static_cast<char>(std::tolower(static_cast<unsigned char>(text[i + 1])));
+                    if(next == 'w' || next == 'h' || next == 'm')
+                        return true;
+                }
+            }
+            return false;
+        }
+
         std::mutex&                                                  declaration_cache_lock = *new std::mutex;
-        std::unordered_map<std::string, std::vector<style_op>>&      declaration_cache = *new std::unordered_map<std::string, std::vector<style_op>>;
+        // Telegram (VENDOR.md edit 79): with what the declaration's parse read of the environment.
+        struct cached_declaration
+        {
+            std::vector<style_op> ops;
+            int                   environment = 0;
+        };
+        std::unordered_map<std::string, cached_declaration>&         declaration_cache = *new std::unordered_map<std::string, cached_declaration>;
+
+        // Telegram (VENDOR.md edit 79): the environment the declaration being parsed read.
+        thread_local int g_environment = 0;
+        struct environment_scope
+        {
+            int& target;
+            int  outer;
+            explicit environment_scope(int& t) : target(t), outer(g_environment) { g_environment = 0; }
+            ~environment_scope()
+            {
+                target |= g_environment;
+                g_environment |= outer;
+            }
+        };
 
         bool split_declarations(const std::string& txt, std::vector<std::pair<size_t, size_t>>& out)
         {
@@ -198,15 +243,39 @@ namespace litehtml
                 layer = true;
             std::string key(txt, d.first, d.second);
             key.push_back(container ? '\x01' : '\x00');
+            // Telegram (VENDOR.md edit 29.7): the container's sanitizer key, so containers whose hooks differ never
+            // share a cached declaration.
+            if(container)
+            {
+                const uint32_t sanitizer = container->sanitizer_key();
+                key.append(reinterpret_cast<const char*>(&sanitizer), sizeof sanitizer);
+            }
+            // Telegram (VENDOR.md edit 13): light-dark() and color-scheme resolve against the container's scheme.
+            if(container)
+            {
+                key.push_back(container_color_scheme(container) ? '\x03' : '\x02');
+            }
+            // Telegram (VENDOR.md edit 11): viewport units fold to pixels while parsing (fold_math), against the
+            // container's viewport, so a declaration that may hold one is cached per viewport.
+            if(container && declaration_may_hold_viewport_unit(key))
+            {
+                media_features media;
+                container->get_media_features(media);
+                key += std::to_string(media.width.value());
+                key.push_back('x');
+                key += std::to_string(media.height.value());
+            }
             std::vector<style_op> ops;
+            int                   environment = 0;
             bool                  hit = false;
             {
                 std::lock_guard<std::mutex> guard(declaration_cache_lock);
                 auto                        it = declaration_cache.find(key);
                 if(it != declaration_cache.end())
                 {
-                    ops = it->second;
-                    hit = true;
+                    ops         = it->second.ops;
+                    environment = it->second.environment;
+                    hit         = true;
                 }
             }
             if(!hit)
@@ -219,15 +288,17 @@ namespace litehtml
                 scratch.add(tokens, baseurl, container);
                 recorded_ops = nullptr;
                 suppress_raw = suppressed;
+                environment = scratch.m_environment; // Telegram (VENDOR.md edit 79)
                 // Viewport lengths fold to px at the current viewport, so their result holds for this parse only.
                 if(!has_viewport_units(tokens))
                 {
                     std::lock_guard<std::mutex> guard(declaration_cache_lock);
                     if(declaration_cache.size() > 50000)
                         declaration_cache.clear();
-                    declaration_cache.emplace(key, ops);
+                    declaration_cache.emplace(key, cached_declaration{ops, environment});
                 }
             }
+            m_environment |= environment; // Telegram (VENDOR.md edit 79)
             for(const auto& op : ops)
             {
                 if(layer && is_raw_declaration(op.name))
@@ -263,7 +334,12 @@ namespace litehtml
             // Note: decl.value is already componentized, see consume_qualified_rule and consume_style_block_contents.
             // Note: decl.value may be empty.
             std::string name = decl.name.substr(0, 2) == "--" ? decl.name : lowcase(decl.name);
+#if 0
             if(container && !container->sanitize_declaration(name, decl.value))
+#else
+            // Telegram (VENDOR.md edit 29.1): the mutable profile hook; its default calls sanitize_declaration.
+            if(container && !container->profile_declaration(name, decl.value, decl.important))
+#endif
             {
                 continue;
             }
@@ -308,16 +384,6 @@ namespace litehtml
         }
     }
 
-    void style::add_length_property(string_id name, const css_token& val, const css_values& keywords, int options,
-                                    bool important)
-    {
-        css_length length;
-        if(length.from_token(val, options, keywords))
-        {
-            add_parsed_property(name, property_value(length, important));
-        }
-    }
-
     static const char* const raw_declaration_names[] = {
         "animation", "animation-name", "animation-duration", "animation-timing-function", "animation-delay",
         "animation-iteration-count", "animation-direction", "animation-fill-mode", "animation-play-state",
@@ -326,6 +392,23 @@ namespace litehtml
         "bottom", "box-shadow", "border-color", "max-height", "stroke-dashoffset", "fill", "stroke", "translate",
         "scale", "rotate", "filter", "letter-spacing", "font-size", "margin-top", "margin-left", "flex-grow",
         "transform-origin", "backdrop-filter", "pointer-events", "touch-action", "quotes", "object-fit", "object-position", "text-overflow",
+        // Telegram (VENDOR.md edit 51): profile 1's properties litehtml keeps no value of, for getComputedStyle.
+        "counter-increment", "counter-reset", "unicode-bidi", "color-scheme", "grid-template-areas", "grid-auto-columns",
+        "grid-auto-flow", "font-feature-settings", "font-variant-numeric",
+        // Telegram (VENDOR.md edit 51): litehtml keeps these, but its value cannot tell an undeclared one from a
+        // declared one (justify-content and align-content default to flex-start and stretch).
+        "justify-content", "align-content",
+        // Telegram (VENDOR.md edit 51): litehtml computes these on flex or grid containers or flex items only.
+        "flex-direction", "flex-wrap", "align-items", "row-gap", "column-gap", "flex-shrink", "flex-basis",
+        // Telegram (VENDOR.md edit 51): as written, which litehtml's value loses (a ratio stored as one float, a flex
+        // shorthand's omitted basis stored as 0px where CSS writes 0%).
+        "aspect-ratio", "flex",
+        // Telegram (VENDOR.md edit 51): as written, which litehtml's value loses (normal and stretch stored as the
+        // defaults, flex-start and stretch).
+        "place-content",
+        // Telegram (VENDOR.md edit 51): the cascaded value a CSS animation's implicit keyframe starts from
+        // (getComputedStyle reads litehtml's own, edit 53).
+        "z-index", "user-select",
     };
 
     static const std::map<string_id, string_id>& raw_declaration_ids()
@@ -421,10 +504,126 @@ namespace litehtml
         return !out.empty();
     }
 
+    // Telegram (VENDOR.md edit 15): keeps the first `keep` comma-separated groups of `tokens` (all of them if fewer).
+    // Returns whether anything was dropped.
+    static bool keep_comma_groups(css_token_vector& tokens, size_t keep)
+    {
+        size_t groups = 1;
+        for(size_t i = 0; i < tokens.size(); i++)
+        {
+            if(tokens[i].type == ',' && ++groups > keep)
+            {
+                tokens.resize(i);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Telegram (VENDOR.md edit 15): a function's arguments keep their first `keep` comma-separated groups (gradient
+    // colour stops, clip-path polygon points), inside the tokens of one layer.
+    static bool cap_function_arguments(css_token_vector& tokens, size_t keep)
+    {
+        bool changed = false;
+        for(auto& tok : tokens)
+        {
+            if(tok.type == CV_FUNCTION)
+            {
+                changed = keep_comma_groups(tok.value, keep) || changed;
+            }
+        }
+        return changed;
+    }
+
+    // Telegram (VENDOR.md edit 15): list-valued properties keep at most max_css_layers layers or shadows, and
+    // max_css_functions functions, max_css_list colour stops or points. The tokens are cut here, before any copy is kept (the raw
+    // declaration, and the token value every element's style holds); the parsers cap what they build as well.
+    // Returns whether `value` was cut into `capped`.
+    // Telegram (VENDOR.md edit 21): font-family is inherited as a string by every element below, so a long list is copied
+    // once per element whatever the style-byte budget charged for it once. A list is cut at 1 KiB, at a comma where it can.
+    static void cap_font_family(std::string& family)
+    {
+        constexpr size_t max_font_family_bytes = 1024;
+        if(family.size() <= max_font_family_bytes)
+            return;
+        size_t cut = family.rfind(',', max_font_family_bytes);
+        family.resize(cut == std::string::npos || cut == 0 ? max_font_family_bytes : cut);
+        family.shrink_to_fit();
+    }
+
+    static bool cap_list_value(string_id name, const css_token_vector& value, css_token_vector& capped)
+    {
+        capped = value;
+        switch(name)
+        {
+        case _box_shadow_:
+        case _text_shadow_:
+        case _background_position_:
+        case _background_size_:
+        case _background_repeat_:
+        case _background_attachment_:
+        case _background_origin_:
+        case _background_clip_:
+            return keep_comma_groups(capped, max_css_layers);
+        case _background_:
+        case _background_image_:
+            {
+                bool changed = keep_comma_groups(capped, max_css_layers);
+                return cap_function_arguments(capped, max_css_list + 1) || changed;
+            }
+        case _filter_:
+        case _backdrop_filter_:
+        case _transform_:
+            if(capped.size() > max_css_functions)
+            {
+                capped.resize(max_css_functions);
+                return true;
+            }
+            return false;
+        case _clip_path_:
+            return cap_function_arguments(capped, max_css_list + 1);
+        default:
+            return false;
+        }
+    }
+
     // `value` is a list of component values with all whitespace tokens removed, including those inside component values
+    // Telegram (VENDOR.md edit 79).
+    void note_environment(int bits)
+    {
+        g_environment |= bits;
+    }
+
+    bool text_may_hold_viewport_unit(const std::string& text)
+    {
+        return declaration_may_hold_viewport_unit(text);
+    }
+
+    namespace
+    {
+        // Telegram (VENDOR.md edit 80): whether a value names light-dark() anywhere, a nested function included.
+        bool names_light_dark(const css_token_vector& tokens)
+        {
+            for(const auto& tok : tokens)
+            {
+                if(tok.type == CV_FUNCTION && lowcase(tok.name()) == "light-dark")
+                    return true;
+                if(tok.is_component_value() && names_light_dark(tok.value))
+                    return true;
+            }
+            return false;
+        }
+    } // namespace
+
     void style::add_property(string_id name, const css_token_vector& value, const std::string& baseurl, bool important,
                              document_container* container)
     {
+        environment_scope scope(m_environment); // Telegram (VENDOR.md edit 79)
+        // Telegram (VENDOR.md edit 80): a value kept as tokens (a shadow, a filter, an SVG paint) resolves light-dark()
+        // later, at compute or at draw, outside this scope: it reads the scheme all the same. A custom property's readers
+        // are marked where the value is substituted (subst_vars parses it here), not the rule declaring it.
+        if(container && _s(name).compare(0, 2, "--") != 0 && names_light_dark(value))
+            note_environment(environment_scheme);
         if(is_raw_declaration(name))
         {
             add_parsed_property(name, property_value(value, important, has_var(value)));
@@ -433,6 +632,11 @@ namespace litehtml
         if(name == __webkit_backdrop_filter_)
         {
             name = _backdrop_filter_;
+        }
+        // Telegram (VENDOR.md edit 15): a list past its cap is cut before anything keeps a copy of it.
+        if(css_token_vector capped; cap_list_value(name, value, capped))
+        {
+            return add_property(name, capped, baseurl, important, container);
         }
         if(string_id raw = raw_declaration_id(name); raw != empty_id && !value.empty() && !suppress_raw)
         {
@@ -600,6 +804,12 @@ namespace litehtml
         case _min_width_:
         case _min_height_:
             {
+                // Telegram (VENDOR.md edit 39): width and height also take the intrinsic keywords (width_keyword).
+                if(name == _width_ || name == _height_)
+                {
+                    constexpr auto keywords = split_css_values<4>("auto;min-content;max-content;fit-content");
+                    return add_length_property(name, val, keywords, f_length_percentage | f_positive, important);
+                }
                 constexpr auto auto_val = split_css_values<1>("auto");
                 return add_length_property(name, val, auto_val, f_length_percentage | f_positive, important);
             }
@@ -803,6 +1013,7 @@ namespace litehtml
         case _font_family_:
             if(parse_font_family(value, str))
             {
+                cap_font_family(str);
                 add_parsed_property(name, property_value(str, important));
             }
             break;
@@ -1044,7 +1255,14 @@ namespace litehtml
                     light = light || word == "light";
                     dark  = dark || word == "dark";
                 }
+#if 0
                 add_parsed_property(name, property_value(dark && !light ? 1 : 0, important));
+#else
+                // Telegram (VENDOR.md edit 13): naming both light and dark gives the container's scheme.
+                if(light && dark && container)
+                    note_environment(environment_scheme); // edit 80
+                add_parsed_property(name, property_value(light && dark ? container_color_scheme(container) : (dark ? 1 : 0), important));
+#endif
             }
             break;
 
@@ -1138,6 +1356,12 @@ namespace litehtml
             //  ==================================  OTHER  ==================================
 
         case _cursor_:
+            str = get_repr(value, 0, -1, true);
+            add_parsed_property(name, property_value(str, important));
+            break;
+
+        // Telegram (VENDOR.md edit 32.4): quotes, kept as its text (getComputedStyle reads it).
+        case _quotes_:
             str = get_repr(value, 0, -1, true);
             add_parsed_property(name, property_value(str, important));
             break;
@@ -2030,6 +2254,7 @@ namespace litehtml
         add_parsed_property(_font_weight_, property_value(weight, important));
         add_parsed_property(_font_size_, property_value(size, important));
         add_parsed_property(_line_height_, property_value(line_height, important));
+        cap_font_family(font_family);
         add_parsed_property(_font_family_, property_value(font_family, important));
     }
 
@@ -2449,6 +2674,7 @@ namespace litehtml
         }
     }
 
+#if 0
     void style::combine(const style& src)
     {
         const int order_offset = m_counter;
@@ -2461,6 +2687,142 @@ namespace litehtml
                 m_properties[property.first].m_order = order_offset + order;
         }
         m_counter = std::max(m_counter, order_offset + src.m_counter);
+    }
+#else
+    // Telegram (VENDOR.md edit 43): in the order the declarations were written (their m_order), not the map's (by string
+    // id): subst_vars keeps a longhand written after a var() shorthand, so the element must know which came later.
+    namespace
+    {
+        std::vector<const std::pair<const string_id, property_value>*> written_order(const props_map& properties)
+        {
+            std::vector<const std::pair<const string_id, property_value>*> order;
+            order.reserve(properties.size());
+            for(const auto& property : properties)
+                order.push_back(&property);
+            std::stable_sort(order.begin(), order.end(),
+                             [](const auto* a, const auto* b) { return a->second.m_order < b->second.m_order; });
+            return order;
+        }
+    } // namespace
+
+    void style::combine(const style& src)
+    {
+        for(const auto* property : written_order(src.m_properties))
+        {
+            add_parsed_property(property->first, property->second);
+        }
+        m_environment |= src.m_environment; // Telegram (VENDOR.md edit 79)
+    }
+#endif
+
+    // Telegram (VENDOR.md edit 21).
+    namespace
+    {
+        size_t string_heap(const std::string& s)
+        {
+            return s.capacity() > 22 ? s.capacity() + 1 : 0;
+        }
+
+        size_t token_heap(const css_token_vector& tokens)
+        {
+            size_t bytes = tokens.capacity() * sizeof(css_token);
+            for(const auto& token : tokens)
+            {
+                bytes += string_heap(token.str()) + string_heap(token.repr);
+                if(!token.value.empty())
+                    bytes += token_heap(token.value);
+            }
+            return bytes;
+        }
+    } // namespace
+
+    namespace
+    {
+        size_t value_heap(const property_value& value)
+        {
+            if(value.is<std::string>())
+                return string_heap(value.get<std::string>());
+            if(value.is<string_vector>())
+            {
+                const auto& strings = value.get<string_vector>();
+                size_t      bytes   = strings.capacity() * sizeof(std::string);
+                for(const auto& s : strings)
+                    bytes += string_heap(s);
+                return bytes;
+            }
+            if(value.is<css_token_vector>())
+                return token_heap(value.get<css_token_vector>());
+            return 0;
+        }
+    } // namespace
+
+    size_t style::payload_bytes() const
+    {
+        size_t bytes = 0;
+        for(const auto& property : m_properties)
+            bytes += value_heap(property.second);
+        return bytes;
+    }
+
+    size_t style::payload_growth_over(const style& base) const
+    {
+        size_t bytes = 0;
+        for(const auto& property : m_properties)
+        {
+            const size_t held = value_heap(property.second);
+            if(held == 0)
+                continue;
+            const auto   it   = base.m_properties.find(property.first);
+            const size_t had  = it == base.m_properties.end() ? 0 : value_heap(it->second);
+            if(held > had)
+                bytes += held - had;
+        }
+        return bytes;
+    }
+
+    size_t style::token_payload_bytes(const css_token_vector& tokens)
+    {
+        return token_heap(tokens);
+    }
+
+    void style::var_stats(size_t& var_uses, size_t& largest_custom) const
+    {
+        for(const auto& property : m_properties)
+        {
+            if(property.second.m_has_var)
+                var_uses++;
+            const std::string& name = _s(property.first);
+            if(name.size() > 2 && name[0] == '-' && name[1] == '-' && property.second.is<css_token_vector>())
+                largest_custom = std::max(largest_custom, value_heap(property.second));
+        }
+    }
+
+    void style::combine_fixed(const style& src)
+    {
+#if 0
+        for(const auto& property : src.m_properties)
+        {
+            if(value_heap(property.second) == 0)
+                add_parsed_property(property.first, property.second);
+        }
+#else
+        for(const auto* property : written_order(src.m_properties)) // Telegram (VENDOR.md edit 43)
+        {
+            if(value_heap(property->second) == 0)
+                add_parsed_property(property->first, property->second);
+        }
+#endif
+        m_environment |= src.m_environment; // Telegram (VENDOR.md edit 79)
+    }
+
+    void style::max_payload_into(std::map<string_id, size_t>& most) const
+    {
+        for(const auto& property : m_properties)
+        {
+            const size_t held = value_heap(property.second);
+            if(held > most[property.first])
+                most[property.first] = held;
+        }
     }
 
     const property_value& style::get_property(string_id name) const
@@ -2575,6 +2937,9 @@ namespace litehtml
         return n;
     }
 
+    // Telegram (VENDOR.md edit 21): set when a splice was refused by the style-byte budget.
+    static thread_local bool g_splice_refused = false;
+
     static bool resolve_vars(css_token_vector& tokens, const html_tag* el, std::set<string_id>& chain, int depth,
                              var_budget& budget)
     {
@@ -2591,15 +2956,33 @@ namespace litehtml
                 if(chain.count(name))
                     return false;
                 css_token_vector value;
-                bool             invalid = false;
-                if(!el->get_custom_property(name, value, &invalid))
+                css_token_vector value;
+                if(const css_token_vector* found = el->find_custom_property(name))
                 {
+                    // Telegram (VENDOR.md edit 21): the splice is charged to the style-byte budget before the value is copied.
+                    if(!el->charge_splice(token_heap(*found)))
+                    {
+                        g_splice_refused = true;
+                        return false;
+                    }
+                    value = *found;
+                } else
+                {
+                    // no value, or the guaranteed-invalid one (the fork's `invalid`): the fallback
+                    bool             invalid = false;
+                    css_token_vector none;
+                    el->get_custom_property(name, none, &invalid);
                     if(args.size() == 1)
                     {
                         budget.invalid = invalid;
                         return false;
                     }
                     remove(args, 0, 2);
+                    if(!el->charge_splice(token_heap(args)))
+                    {
+                        g_splice_refused = true;
+                        return false;
+                    }
                     value = args;
                 }
                 const size_t size = deep_token_count(value, budget.left);
@@ -2653,7 +3036,25 @@ namespace litehtml
         for(auto& [name, prop] : pending)
         {
             auto& value = prop.template get<css_token_vector>();
-            if(!subst_vars_(name, value, el))
+            g_splice_refused = false; // Telegram (VENDOR.md edit 21)
+            el->begin_splice(name);
+            const bool resolved = subst_vars_(name, value, el);
+            el->end_splice();
+            if(g_splice_refused)
+            {
+                // Telegram (VENDOR.md edit 21): past the budget the declaration is dropped, not substituted.
+                g_splice_refused = false;
+                auto stored      = m_properties.find(name);
+                if(stored != m_properties.end() && stored->second.is<css_token_vector>())
+                {
+                    auto& kept = stored->second.get<css_token_vector>();
+                    kept.clear();
+                    kept.shrink_to_fit();
+                    stored->second.m_has_var = false;
+                }
+                continue;
+            }
+            if(!resolved)
             {
                 if(_s(name).substr(0, 2) == "--")
                 {
@@ -2664,6 +3065,24 @@ namespace litehtml
                     continue;
                 }
                 value = {css_token(IDENT, "unset")};
+            }
+            // Telegram (VENDOR.md edit 29.6): the container judges a declaration's value once var() is substituted
+            // (custom properties were judged where they were declared); a refusal drops it as edit 21's budget does.
+            if(document_container* hooks = el->get_document()->container())
+            {
+                const std::string& substituted_name = _s(name);
+                if(substituted_name.compare(0, 2, "--") != 0 && !hooks->profile_substituted(substituted_name, value))
+                {
+                    auto stored = m_properties.find(name);
+                    if(stored != m_properties.end() && stored->second.is<css_token_vector>())
+                    {
+                        auto& kept = stored->second.get<css_token_vector>();
+                        kept.clear();
+                        kept.shrink_to_fit();
+                        stored->second.m_has_var = false;
+                    }
+                    continue;
+                }
             }
             std::vector<std::pair<string_id, property_value>> later;
             for(auto longhand : at(shorthands, name))

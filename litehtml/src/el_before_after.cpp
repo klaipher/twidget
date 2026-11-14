@@ -5,11 +5,44 @@
 #include "el_space.h"
 #include "el_image.h"
 #include "utf8_strings.h"
+#include "css_parser.h" // Telegram (VENDOR.md edit 19): max_css_list
+
+namespace litehtml
+{
+    namespace
+    {
+        // Telegram (VENDOR.md edit 19): a content url() image, counted like its pseudo-element.
+        class el_pseudo_image : public el_image
+        {
+          public:
+            explicit el_pseudo_image(const document::ptr& doc) :
+                el_image(doc)
+            {
+                if(doc)
+                    doc->note_pseudo_element(1);
+            }
+            ~el_pseudo_image() override
+            {
+                if(const auto doc = get_document())
+                    doc->note_pseudo_element(-1);
+            }
+        };
+    } // namespace
+} // namespace litehtml
 
 litehtml::el_before_after_base::el_before_after_base(const std::shared_ptr<document>& doc, bool before) :
     html_tag(doc)
 {
     m_tag = before ? __tag_before_ : __tag_after_;
+    if(doc)
+        doc->note_pseudo_element(1); // Telegram (VENDOR.md edit 19)
+}
+
+// Telegram (VENDOR.md edit 19).
+litehtml::el_before_after_base::~el_before_after_base()
+{
+    if(const auto doc = get_document())
+        doc->note_pseudo_element(-1);
 }
 
 void litehtml::el_before_after_base::add_style(const style& style)
@@ -18,6 +51,9 @@ void litehtml::el_before_after_base::add_style(const style& style)
 
     auto children = m_children;
     m_children.clear();
+    // Telegram (VENDOR.md edit 84): the content made before stays alive, and counted, while this one is made.
+    if(const auto doc = get_document())
+        doc->note_generated_transient(int(children.size()));
 
     const auto& content_property = style.get_property(_content_);
     if(content_property.is<std::string>() && !content_property.get<std::string>().empty())
@@ -31,11 +67,16 @@ void litehtml::el_before_after_base::add_style(const style& style)
         {
             // The value is kept as written: read it with the tokenizer, as the sanitizer did, so that an
             // escaped quote stays inside its string and only a url token or url() names an image.
+            // Telegram (VENDOR.md edit 19): at most max_css_list items (strings, images and functions) are kept.
+            size_t items = 0;
             for(const css_token& tok : normalize(str, f_componentize | f_remove_whitespace))
             {
+                if(items >= max_css_list)
+                    break;
                 std::string url;
                 if(tok.type == STRING)
                 {
+                    items++;
                     add_text(tok.str(), false);
                 } else if(tok.type == IDENT)
                 {
@@ -44,9 +85,11 @@ void litehtml::el_before_after_base::add_style(const style& style)
                         add_quote(name == "open-quote");
                 } else if(parse_url(tok, url))
                 {
+                    items++;
                     add_image(url);
                 } else if(tok.type == CV_FUNCTION)
                 {
+                    items++;
                     add_function(lowcase(tok.name()), get_repr(tok.value));
                 }
             }
@@ -61,8 +104,12 @@ void litehtml::el_before_after_base::add_style(const style& style)
 
 void litehtml::el_before_after_base::add_text(const std::string& txt, bool escapes)
 {
+    const document::generated_scope generated(get_document().get()); // Telegram (VENDOR.md edit 84)
     std::string word;
     std::string esc;
+    // Telegram (VENDOR.md edit 10): content is made again on every restyle, for every element it matches, so it
+    // stops at the document's text cap like parsed text does.
+    const auto doc = get_document();
 
     for(auto chr : txt)
     {
@@ -86,10 +133,14 @@ void litehtml::el_before_after_base::add_text(const std::string& txt, bool escap
             {
                 if(!word.empty())
                 {
+                    if(doc && !doc->text_element_allowed())
+                        return;
                     element::ptr el = std::make_shared<el_text>(word.c_str(), get_document());
                     appendChild(el);
                     word.clear();
                 }
+                if(doc && !doc->text_element_allowed())
+                    return;
                 word            += chr;
                 element::ptr el  = std::make_shared<el_space>(word.c_str(), get_document());
                 appendChild(el);
@@ -107,6 +158,8 @@ void litehtml::el_before_after_base::add_text(const std::string& txt, bool escap
     }
     if(!word.empty())
     {
+        if(doc && !doc->text_element_allowed())
+            return;
         element::ptr el = std::make_shared<el_text>(word.c_str(), get_document());
         appendChild(el);
         word.clear();
@@ -178,11 +231,13 @@ void litehtml::el_before_after_base::add_function(const std::string& fnc, const 
         break;
     // counter
     case 1:
+        m_reads_counters = true; // Telegram (VENDOR.md edit 78)
         add_text(get_counter_value(params));
         break;
     // counters
     case 2:
         {
+            m_reads_counters = true; // Telegram (VENDOR.md edit 78)
             string_vector tokens;
             split_string(params, tokens, ",");
             for(auto& str : tokens)
@@ -201,7 +256,13 @@ void litehtml::el_before_after_base::add_image(const std::string& url)
     {
         return;
     }
-    element::ptr el = std::make_shared<el_image>(get_document());
+    // Telegram (VENDOR.md edit 19): the element cap counts the image.
+    const auto doc = get_document();
+    if(doc && !doc->pseudo_element_allowed())
+    {
+        return;
+    }
+    element::ptr el = std::make_shared<el_pseudo_image>(get_document());
     el->set_attr("src", url.c_str());
     el->set_attr("style", "display:inline-block");
     el->set_tagName("img");

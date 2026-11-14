@@ -649,7 +649,79 @@ namespace litehtml
          * @return
          */
         void get_rendering_boxes(const std::function<void(const position&)>& redraw_box) const;
+
+        // Telegram (VENDOR.md edit 20): the geometry this item had before the running layout wrote it, saved by its first
+        // write in the document's observed epoch (observe_geometry) and compared when that layout ends
+        // (document::render), so the render_observer hears of each changed box once, at the write, with nothing walked
+        // for it. An inline context also keeps its inline content's geometry, which layout writes without render().
+        uint32_t              m_observed_epoch = 0;
+        position              m_observed_pos;
+        margins               m_observed_padding;
+        margins               m_observed_borders;
+        std::vector<position> m_observed_inline;
+        void                  observe_geometry();
+        // render_observer::moved | resized | reflowed, against what observe_geometry saved.
+        unsigned              observed_change() const;
     };
+
+    // Telegram (VENDOR.md edit 20): the traversal draw() performs, with a visitor where draw() paints an item. A walk IS
+    // draw(): walk_paint_order calls document::draw with the visitor installed, so the container receives every call
+    // draw() makes outside an item's own paint (overflow clips, groups, clip paths, filters, backdrops, clip escapes),
+    // in draw()'s order, and the visitor is told where painting contexts and draw_children passes begin and end, and is
+    // handed each item's own paint (element::draw, or a table row's draw_background) to run or not. With no visitor
+    // installed every hook below does exactly what the line it sits beside did, so draw() is unchanged.
+    enum class paint_context
+    {
+        root,     // the document's root: draw_stacking_context of the root item
+        stacking, // draw_stacking_context(…, true): a positioned item
+        pseudo,   // draw_stacking_context(…, false): a float, an inline-block, inline-flex or inline-grid
+        group     // draw_group: opacity, transform, filter, backdrop-filter, clip-path, sticky
+    };
+    struct paint_visitor
+    {
+        virtual ~paint_visitor() = default;
+        // A painting context begins (its item's own paint, for every kind but a group, came just before) and ends.
+        virtual void open_context(const std::shared_ptr<render_item>& item, paint_context kind) = 0;
+        virtual void close_context() noexcept = 0;
+        // draw_children(item, pass, zindex) begins and ends: what item clips, it clips between the two.
+        virtual void open_pass(const std::shared_ptr<render_item>& item, draw_flag pass, int zindex) = 0;
+        virtual void close_pass() noexcept = 0;
+        // Where draw() paints `item` itself, in `pass` (draw_root for a context's own paint), at (x, y). `paint` runs that
+        // paint, with no visitor installed while it does.
+        virtual void paint_element(const std::shared_ptr<render_item>& item, draw_flag pass, pixel_t x, pixel_t y,
+                                   const std::function<void()>& paint) = 0;
+    };
+    extern thread_local paint_visitor* g_paint_visitor;
+    // document::draw(hdc, x, y, nullptr) with `visitor` installed: litehtml's own paint order, painting nothing itself.
+    void walk_paint_order(document& doc, paint_visitor& visitor, uint_ptr hdc, pixel_t x, pixel_t y);
+    // Runs `run` (a part of draw(): an item's draw_children, a draw_group) with `visitor` installed.
+    void with_paint_visitor(paint_visitor& visitor, const std::function<void()>& run);
+    // An item draw site: the visitor's paint_element when a walk runs, else the paint itself.
+    void paint_or_visit(const std::shared_ptr<render_item>& item, draw_flag pass, uint_ptr hdc, pixel_t x, pixel_t y,
+                        const position* clip, bool background = false);
+    // Tells the walk's visitor where a context or a pass begins, and where it ends (the scope's end). Nothing without one.
+    struct paint_context_scope
+    {
+        paint_visitor* visitor = nullptr;
+        paint_context_scope(render_item* item, paint_context kind);
+        ~paint_context_scope();
+        paint_context_scope(const paint_context_scope&)            = delete;
+        paint_context_scope& operator=(const paint_context_scope&) = delete;
+    };
+    struct paint_pass_scope
+    {
+        paint_visitor* visitor = nullptr;
+        paint_pass_scope(render_item* item, draw_flag pass, int zindex);
+        ~paint_pass_scope();
+        paint_pass_scope(const paint_pass_scope&)            = delete;
+        paint_pass_scope& operator=(const paint_pass_scope&) = delete;
+    };
+    // Where draw() paints `item` itself: the (x, y) its own draw and its draw_children get, by draw()'s arithmetic (a cell
+    // or a row at its table's, a fixed item at (0, 0), a paint group shifted by its sticky offset; `before_sticky`: the
+    // (x, y) draw_group is called with, before it adds the item's own sticky offset).
+    void paint_origin(const render_item& item, pixel_t& x, pixel_t& y, bool before_sticky = false);
+    // The clip draw_children(x, y) opens for `item`, as it computes it; false when it opens none.
+    bool paint_clip(const render_item& item, pixel_t x, pixel_t y, position& box, border_radiuses& radius);
 } // namespace litehtml
 
 #endif // LITEHTML_RENDER_ITEM_H

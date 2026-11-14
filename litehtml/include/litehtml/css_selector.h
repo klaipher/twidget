@@ -199,6 +199,9 @@ namespace litehtml
 
         selector_specificity       m_specificity;
         int                        m_order = 0;
+        // Telegram (VENDOR.md edit 41): the master sheet's @layer block the rule is in (0: none). A layered master rule
+        // ranks above every unlayered one, whatever their specificity; revert skips it.
+        int                        m_layer = 0;
         css_selector::ptr          m_left;
         css_element_selector       m_right;
         css_combinator             m_combinator = combinator_descendant;
@@ -224,6 +227,7 @@ namespace litehtml
 
     //////////////////////////////////////////////////////////////////////////
 
+#if 0
     inline bool operator>(const css_selector& v1, const css_selector& v2)
     {
         if(v1.m_specificity == v2.m_specificity)
@@ -241,6 +245,34 @@ namespace litehtml
         }
         return (v1.m_specificity < v2.m_specificity);
     }
+#else
+    // Telegram (VENDOR.md edit 41): the layer first, then specificity, then order.
+    inline bool operator>(const css_selector& v1, const css_selector& v2)
+    {
+        if(v1.m_layer != v2.m_layer)
+        {
+            return v1.m_layer > v2.m_layer;
+        }
+        if(v1.m_specificity == v2.m_specificity)
+        {
+            return (v1.m_order > v2.m_order);
+        }
+        return (v1.m_specificity > v2.m_specificity);
+    }
+
+    inline bool operator<(const css_selector& v1, const css_selector& v2)
+    {
+        if(v1.m_layer != v2.m_layer)
+        {
+            return v1.m_layer < v2.m_layer;
+        }
+        if(v1.m_specificity == v2.m_specificity)
+        {
+            return (v1.m_order < v2.m_order);
+        }
+        return (v1.m_specificity < v2.m_specificity);
+    }
+#endif
 
     inline bool operator>(const css_selector::ptr& v1, const css_selector::ptr& v2)
     {
@@ -262,6 +294,8 @@ namespace litehtml
 
         css_selector::ptr m_selector;
         bool              m_used;
+        bool              m_author = false; // Telegram (VENDOR.md edit 21): matched from an author or user sheet
+        int               m_sheet  = 0;     // Telegram (VENDOR.md edit 21): 0 master, 1 author, 2 user
 
         used_selector(css_selector::ptr selector, bool used) :
             m_selector(std::move(selector)),

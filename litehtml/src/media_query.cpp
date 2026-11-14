@@ -54,7 +54,7 @@ namespace litehtml
     bool media_feature::check(const media_features& feat) const
     {
         if(name == "prefers-color-scheme")
-            return compare(feat.dark_color_scheme ? _dark_ : _light_);
+            return compare(feat.dark_color_scheme || feat.color_scheme ? _dark_ : _light_); // Telegram (VENDOR.md edit 13): either field
         switch(_id(name))
         {
         case _width_:
@@ -87,6 +87,14 @@ namespace litehtml
             return compare(feat.monochrome);
         case _resolution_:
             return compare(feat.resolution.value());
+        // Telegram (VENDOR.md edit 29.5): the reduced-motion preference the container reports; in a boolean context,
+        // `(prefers-reduced-motion)`, only reduce matches.
+        case _prefers_reduced_motion_:
+            if(!op2 && op == u'≠' && value == static_cast<float>(_none_))
+            {
+                return feat.reduced_motion != 0;
+            }
+            return compare(feat.reduced_motion ? _reduce_ : _no_preference_);
         default:
             assert(0); // must never happen, unknown media features are handled in parse_media_feature
             return false;
@@ -231,6 +239,21 @@ namespace litehtml
         bool ret  = (apply != m_is_used);
         m_is_used = apply;
         return ret;
+    }
+
+    // Telegram (VENDOR.md edit 79).
+    bool media_query_list_list::would_flip(const media_features& features) const
+    {
+        bool apply = true;
+        for(const auto& mq_list : m_media_query_lists)
+        {
+            if(!mq_list.check(features))
+            {
+                apply = false;
+                break;
+            }
+        }
+        return apply != m_is_used;
     }
 
     bool parse_media_query(const css_token_vector& tokens, media_query& mquery, const std::shared_ptr<document>& doc);
@@ -471,6 +494,9 @@ namespace litehtml
         // https://drafts.csswg.org/mediaqueries/#orientation
         {"orientation",         {_discrete_, _keyword_, {_portrait_, _landscape_}}},
 
+        // Telegram (VENDOR.md edit 29.5): https://drafts.csswg.org/mediaqueries-5/#prefers-reduced-motion
+        {"prefers-reduced-motion", {_discrete_, _keyword_, {_no_preference_, _reduce_}}},
+
         ////////////////////////////////////////////////
         // 5. Display Quality Media Features
         ////////////////////////////////////////////////
@@ -583,8 +609,10 @@ namespace litehtml
                 {
                     return false;
                 }
-                string_id ident = _id(val[0].ident());
-                if(!contains(mfi.keywords, ident))
+                // Telegram (VENDOR.md edit 24): looked up, not interned. A feature's keywords are interned already, and
+                // matchMedia must not grow the process-wide table with whatever a widget names.
+                string_id ident;
+                if(!_find_id(val[0].ident(), ident) || !contains(mfi.keywords, ident))
                 {
                     return false;
                 }

@@ -9,6 +9,7 @@
 #include "document_container.h"
 #include "types.h"
 #include <cstddef>
+#include "css_parser.h" // Telegram (VENDOR.md edit 32.1): normalize
 
 #define offset(member) offsetof(litehtml::css_properties, member)
 // #define offset(func)	[](const css_properties& css) { return css.func; }
@@ -40,6 +41,73 @@ static std::string merge_font_features(const std::string& variant, const std::st
         out += tag + "=" + value;
     }
     return out;
+}
+
+// Telegram (VENDOR.md edit 21, Ruling E50): an inherited string (one the element does not declare) is copied into the computed style of every descendant,
+// which no charge on the declaring element bounds. Every inherited std::string computed member goes through this: a
+// value over 1 KiB is cut at a comma or a character boundary; a URL (or a value holding url()) over 1 KiB is dropped for
+// `fallback`, because a cut URL loads another image.
+static constexpr size_t max_inherited_string_bytes = 1024;
+
+static void bound_inherited_string(const litehtml::html_tag* el, litehtml::string_id name, std::string& value, bool is_url, const char* fallback)
+{
+    // A value the element declares itself is charged to the style-byte budget; the copies descendants inherit are not.
+    if(el->declares_value(name))
+        return;
+    if(value.size() <= max_inherited_string_bytes)
+        return;
+    if(is_url || value.find("url(") != std::string::npos)
+    {
+        value = fallback;
+        return;
+    }
+    size_t cut = value.rfind(',', max_inherited_string_bytes);
+    if(cut == std::string::npos || cut == 0)
+    {
+        cut = max_inherited_string_bytes;
+        while(cut > 0 && (static_cast<unsigned char>(value[cut]) & 0xC0) == 0x80)
+            cut--;
+    }
+    value.resize(cut);
+    value.shrink_to_fit();
+}
+
+// Telegram (VENDOR.md edit 60): an image bullet set on a list reaches its items however long its URL. The element's
+// list-style-image as get_property<std::string> resolves it (its own string; nothing for initial; else its parent's), the
+// parent's shared rather than copied. The copies cost a pointer, but a list item hashes and copies the URL as it lays out
+// and paints its marker, so a list item inheriting one over 1 KiB is charged its length (style_charge_bullet).
+static std::shared_ptr<const std::string> computed_list_style_image(const litehtml::html_tag* el, bool list_item)
+{
+    const litehtml::property_value& value = el->own_property(litehtml::_list_style_image_);
+    if(value.is<std::string>())
+    {
+        const std::string& url = value.get<std::string>();
+        return url.empty() ? nullptr : std::make_shared<const std::string>(url);
+    }
+    if(value.is<litehtml::css_wide_keyword>() && value.get<litehtml::css_wide_keyword>().kind == litehtml::css_wide_keyword::initial)
+        return nullptr;
+    const auto parent = el->parent();
+    if(!parent)
+        return nullptr;
+    std::shared_ptr<const std::string> url = parent->css().get_list_style_image_shared();
+    if(url && list_item && url->size() > max_inherited_string_bytes && !el->charge_inherited(url->size()))
+        return nullptr;
+    return url;
+}
+
+// Out of line (edit 60): an empty string a header's inline function held as a static would be constant-initialized in
+// read-only memory by a C++20 caller and constructed at run time by a C++17 one (the fork), which then writes to it.
+const std::string& litehtml::css_properties::get_list_style_image() const
+{
+    static const std::string none;
+    return m_list_style_image ? *m_list_style_image : none;
+}
+
+void litehtml::css_properties::charge_inherited_list_style_image(const html_tag* el)
+{
+    if(m_list_style_image && m_display == display_list_item && m_list_style_image->size() > max_inherited_string_bytes &&
+       !el->declares_value(_list_style_image_) && !el->charge_inherited(m_list_style_image->size()))
+        m_list_style_image.reset();
 }
 
 void litehtml::css_properties::compute(const html_tag* el, const document::ptr& doc)
@@ -313,6 +381,10 @@ void litehtml::css_properties::compute(const html_tag* el, const document::ptr& 
     m_z_index = el->get_property<css_length>(_z_index_, false, _auto, offset(m_z_index));
     m_content = el->get_property<std::string>(_content_, false, "", offset(m_content));
     m_cursor  = el->get_property<std::string>(_cursor_, true, "auto", offset(m_cursor));
+    bound_inherited_string(el, _cursor_, m_cursor, false, "auto"); // Telegram (VENDOR.md edit 21)
+    // Telegram (VENDOR.md edit 32.4): quotes, inherited; "" is auto.
+    m_quotes = el->get_property<std::string>(_quotes_, true, "", offset(m_quotes));
+    bound_inherited_string(el, _quotes_, m_quotes, false, "");
 
     m_css_text_indent = el->get_property<css_length>(_text_indent_, true, 0, offset(m_css_text_indent));
     doc->cvt_units(m_css_text_indent, m_font_metrics, 0_px);
@@ -339,12 +411,25 @@ void litehtml::css_properties::compute(const html_tag* el, const document::ptr& 
     m_list_style_position = static_cast<list_style_position>(
         el->get_property<int>(_list_style_position_, true, list_style_position_outside, offset(m_list_style_position)));
 
+#if 0
     m_list_style_image = el->get_property<std::string>(_list_style_image_, true, "", offset(m_list_style_image));
+    bound_inherited_string(el, _list_style_image_, m_list_style_image, true, ""); // Telegram (VENDOR.md edit 21)
     if(!m_list_style_image.empty())
+#else
+    m_list_style_image = computed_list_style_image(el, m_display == display_list_item); // Telegram (VENDOR.md edit 60)
+    if(m_list_style_image)
+#endif
     {
         m_list_style_image_baseurl =
             el->get_property<std::string>(_list_style_image_baseurl_, true, "", offset(m_list_style_image_baseurl));
-        doc->container()->load_image(m_list_style_image.c_str(), m_list_style_image_baseurl.c_str(), true);
+        bound_inherited_string(el, _list_style_image_baseurl_, m_list_style_image_baseurl, true, ""); // Telegram (VENDOR.md edit 21)
+#if 0
+        doc->container()->load_image(get_list_style_image().c_str(), m_list_style_image_baseurl.c_str(), true);
+#else
+        // Telegram (VENDOR.md edit 60): only a list item draws the image; the others only pass the string on.
+        if(m_display == display_list_item)
+            doc->container()->load_image(get_list_style_image().c_str(), m_list_style_image_baseurl.c_str(), true);
+#endif
     }
 
     m_order = el->get_property<int>(_order_, false, 0, offset(m_order));
@@ -466,6 +551,7 @@ void litehtml::css_properties::compute_font(const html_tag* el, const document::
 
     m_font_family = el->get_property<std::string>(_font_family_, true, doc->container()->get_default_font_name(),
                                                   offset(m_font_family));
+    bound_inherited_string(el, _font_family_, m_font_family, false, ""); // Telegram (VENDOR.md edit 21)
 
     bool parent_keyword = el_parent ? el_parent->css().m_keyword_size : true;
     bool parent_mono    = el_parent ? el_parent->css().m_generic_mono : false;
@@ -520,6 +606,7 @@ void litehtml::css_properties::compute_font(const html_tag* el, const document::
     // text-emphasis
     m_text_emphasis_style =
         el->get_property<std::string>(_text_emphasis_style_, true, "", offset(m_text_emphasis_style));
+    bound_inherited_string(el, _text_emphasis_style_, m_text_emphasis_style, false, ""); // Telegram (VENDOR.md edit 21)
     m_text_emphasis_position = el->get_property<int>(_text_emphasis_position_, true, text_emphasis_position_over,
                                                      offset(m_text_emphasis_position));
     m_text_emphasis_color =
@@ -599,6 +686,8 @@ void litehtml::css_properties::compute_font(const html_tag* el, const document::
         el->get_property<std::string>(_font_variant_numeric_, true, "", offset(m_font_variant_numeric));
     m_font_feature_settings =
         el->get_property<std::string>(_font_feature_settings_, true, "", offset(m_font_feature_settings));
+    bound_inherited_string(el, _font_variant_numeric_, m_font_variant_numeric, false, ""); // Telegram (VENDOR.md edit 21)
+    bound_inherited_string(el, _font_feature_settings_, m_font_feature_settings, false, "");
 
     m_text_shadows.clear();
     if(const auto* tokens = el->get_token_property(_text_shadow_))
@@ -946,6 +1035,13 @@ void litehtml::css_properties::compute_effects(const html_tag* el, const documen
                     shadow.color = m_color;
                 }
             }
+            // Telegram: a finite length that converts to a non-finite one (1e38em) leaves the value unset too.
+            bool finite = true;
+            for(const auto& shadow : m_box_shadows)
+                finite = finite && std::isfinite(shadow.x.val()) && std::isfinite(shadow.y.val()) &&
+                         std::isfinite(shadow.blur.val()) && std::isfinite(shadow.spread.val());
+            if(!finite)
+                m_box_shadows.clear();
         }
     }
 

@@ -39,6 +39,8 @@ namespace litehtml
                     shape.values.push_back(len);
                 }
                 if(at < args.size() && (args[at++].ch != ',' || at == args.size())) return false;
+                // Telegram (VENDOR.md edit 15): later points are dropped.
+                if(shape.values.size() > 2 * max_css_list) shape.values.resize(2 * max_css_list);
             }
             if(shape.values.size() < 6) return false;
         } else if(shape.kind == clip_path_shape::inset)
@@ -167,6 +169,11 @@ namespace litehtml
                 return false;
             }
             shadows.push_back(shadow);
+            // Telegram (VENDOR.md edit 15): later entries are dropped.
+            if(shadows.size() > max_css_layers)
+            {
+                shadows.pop_back();
+            }
             shadow    = box_shadow();
             lengths   = 0;
             has_color = false;
@@ -191,6 +198,13 @@ namespace litehtml
             css_length len;
             if(lengths < 4 && parse_shadow_length(tok, len))
             {
+                // Telegram: the tokenizer reads 1e999 as inf and 0e999 as NaN; a non-finite length leaves the
+                // whole value unset.
+                if(!std::isfinite(len.val()))
+                {
+                    shadows.clear();
+                    return false;
+                }
                 css_length* slots[4] = {&shadow.x, &shadow.y, &shadow.blur, &shadow.spread};
                 *slots[lengths++]    = len;
                 continue;
@@ -511,6 +525,7 @@ namespace litehtml
                 const float extent = axis == 1 ? width : axis == 2 ? height : axis == 3 ? std::min(width, height) : std::max(width, height);
                 tok = css_token(DIMENSION, extent * tok.n.number / 100, css_number_number, "px");
                 changed = true;
+                note_environment(environment_viewport); // Telegram (VENDOR.md edit 79)
             }
             if(!tok.is_component_value())
                 continue;
@@ -630,10 +645,17 @@ namespace litehtml
         {
             return true;
         }
+#if 0 // Telegram (VENDOR.md edit 15): more than 32 functions made the value invalid; the extras are dropped now.
         if(tokens.empty() || tokens.size() > 32)
         {
             return false;
         }
+#else
+        if(tokens.empty())
+        {
+            return false;
+        }
+#endif
         std::vector<css_token> args;
         for(const auto& tok : tokens)
         {
@@ -724,6 +746,11 @@ namespace litehtml
                 return false;
             }
             functions.push_back(fn);
+            // Telegram (VENDOR.md edit 15): later functions are dropped, not parsed.
+            if(functions.size() >= max_css_functions)
+            {
+                break;
+            }
         }
         return true;
     }
@@ -903,6 +930,16 @@ namespace litehtml
             // against the box (css_length::from_token), and fails there if it is no length.
             for(auto& arg : args)
                 fold_calc(arg);
+            // Telegram: the tokenizer reads 1e999 as inf and 0e999 as NaN; a non-finite number in any function,
+            // even one ignored below (perspective, an off-axis rotate3d), leaves the whole transform unset.
+            for(const auto& arg : args)
+            {
+                if(is_one_of(arg.type, NUMBER, PERCENTAGE, DIMENSION) && !std::isfinite(arg.n.number))
+                {
+                    functions.clear();
+                    return false;
+                }
+            }
             std::string        name = lowcase(tok.name());
             transform_function fn;
             bool               ok = true;
@@ -1003,7 +1040,21 @@ namespace litehtml
                 functions.clear();
                 return false;
             }
+            // Telegram: and no value computed from those arguments may be non-finite either.
+            bool finite = std::isfinite(fn.x.val()) && std::isfinite(fn.y.val());
+            for(float v : fn.v)
+                finite = finite && std::isfinite(v);
+            if(!finite)
+            {
+                functions.clear();
+                return false;
+            }
             functions.push_back(fn);
+            // Telegram (VENDOR.md edit 15): later functions are dropped, not parsed.
+            if(functions.size() >= max_css_functions)
+            {
+                break;
+            }
         }
         return true;
     }

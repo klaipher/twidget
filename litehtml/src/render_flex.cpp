@@ -108,6 +108,13 @@ litehtml::rendered_width litehtml::render_item_flex::_render_content(pixel_t x, 
             ln.items.reverse();
         }
     }
+    if(is_row_direction && m_lines.size() > 1)
+    {
+        // Telegram: ret_width sums each line's main size, which holds that line's own gaps; the gaps
+        // between one line's last item and the next line's first are the rest, so the intrinsic
+        // (max-content) width of a wrapped row has all N-1 gaps.
+        ret_width += m_lines.front().main_gap * pixel_t(static_cast<int>(m_lines.size()) - 1);
+    }
 
     pixel_t free_cross_size = 0_px;
     bool    is_wrap_reverse = css().get_flex_wrap() == flex_wrap_wrap_reverse;
@@ -380,6 +387,7 @@ std::list<litehtml::flex_line> litehtml::render_item_flex::get_lines(
 
 std::shared_ptr<litehtml::render_item> litehtml::render_item_flex::init()
 {
+    // Telegram: register the flex container with its element, as render_item::init does (VENDOR.md edit 8).
     src_el()->add_render(shared_from_this());
     auto                 doc = src_el()->get_document();
     decltype(m_children) new_children;

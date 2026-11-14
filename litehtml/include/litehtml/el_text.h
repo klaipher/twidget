@@ -15,6 +15,8 @@ namespace litehtml
         size        m_size;
         bool        m_use_transformed;
         bool        m_draw_spaces;
+        // Telegram (VENDOR.md edit 84): made as generated content (::before/::after content, a form control's parts).
+        bool        m_generated = false;
         uint_ptr    m_measured_font = 0;
         int         m_measured_transform = -1;
         std::shared_ptr<text_breaker> m_breaker;
@@ -22,6 +24,9 @@ namespace litehtml
 
       public:
         el_text(const char* text, const document::ptr& doc);
+        // Telegram (VENDOR.md edit 10): the document counts the text pieces it holds.
+        ~el_text() override;
+        bool generated() const { return m_generated; } // Telegram (VENDOR.md edit 84)
 
         void get_text(std::string& text) const override;
         void set_text(const std::string& text);
