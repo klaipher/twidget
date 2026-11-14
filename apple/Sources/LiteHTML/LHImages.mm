@@ -1,6 +1,7 @@
 #import "LHImages.h"
 #include "LHContainer.h"
 
+#if TARGET_OS_OSX
 static NSColor *Hex(uint32_t v, CGFloat a = 1.0)
 {
     return [NSColor colorWithSRGBRed:((v >> 16) & 0xff) / 255.0 green:((v >> 8) & 0xff) / 255.0 blue:(v & 0xff) / 255.0 alpha:a];
@@ -160,9 +161,11 @@ static void RegisterDemoImages(void)
         [@"</>" drawAtPoint:NSMakePoint(32 - sz.width / 2, 32 - sz.height / 2) withAttributes:a];
     }));
 }
+#endif
 
 @implementation LHImages
 
+#if TARGET_OS_OSX
 + (void)registerImage:(NSImage *)image name:(NSString *)name
 {
     LHRegisterAppImage(name, image);
@@ -177,6 +180,7 @@ static void RegisterDemoImages(void)
 {
     return LHImageProvider();
 }
+#endif
 
 + (nullable CGImageRef)copyImageForURL:(NSString *)url
 {
@@ -218,6 +222,7 @@ static void RegisterDemoImages(void)
     LHSetPortableSymbols(portableSymbols);
 }
 
+#if TARGET_OS_OSX
 + (void)registerDemoImages
 {
     static dispatch_once_t once;
@@ -225,5 +230,6 @@ static void RegisterDemoImages(void)
         RegisterDemoImages();
     });
 }
+#endif
 
 @end

@@ -6,6 +6,7 @@
 #include "include/LHRenderList.h"
 #include <CoreGraphics/CoreGraphics.h>
 #include <CoreText/CoreText.h>
+#include <TargetConditionals.h>
 
 #include <array>
 #include <functional>
@@ -17,14 +18,17 @@
 #include <vector>
 #include <atomic>
 
-CGImageRef LHCreateSVGImage(const std::string& markup, CGSize* size);
+// nullptr when its raster would take more than maxPixelBytes (4 bytes a pixel), decided before it is drawn.
+CGImageRef LHCreateSVGImage(const std::string& markup, CGSize* size, size_t maxPixelBytes = ~size_t(0));
 bool       LHRenderingSVGImage(void);
 
 #ifdef __OBJC__
+#if TARGET_OS_OSX
 @class NSImage;
 void LHRegisterAppImage(NSString* name, NSImage* image);
 void LHSetImageProvider(NSImage* (^provider)(NSString* url));
 NSImage* (^LHImageProvider(void))(NSString* url);
+#endif
 void LHForgetImage(NSString* url);
 CGImageRef LHCopyImageForURL(NSString* url) CF_RETURNS_RETAINED;
 CGSize LHImageSizeForURL(NSString* url);
@@ -32,6 +36,19 @@ void LHSetPortableSymbols(bool portable);
 bool LHPortableSymbols(void);
 @class NSFont;
 NSFont* LHResolveFont(NSString* families, CGFloat size, int weight, bool italic);
+#if !TARGET_OS_OSX
+// iOS: NSValue's rect, size and point boxing (valueWithRect:, rectValue, ...) is AppKit's; these box
+// the same CGRect/CGSize/CGPoint bytes those carry on macOS. Swift reads one with getValue(_:).
+static inline NSValue* LHValueWithRect(CGRect rect) { return [NSValue valueWithBytes:&rect objCType:@encode(CGRect)]; }
+static inline NSValue* LHValueWithSize(CGSize size) { return [NSValue valueWithBytes:&size objCType:@encode(CGSize)]; }
+static inline NSValue* LHValueWithPoint(CGPoint point) { return [NSValue valueWithBytes:&point objCType:@encode(CGPoint)]; }
+static inline CGRect   LHRectValue(NSValue* value)
+{
+    CGRect rect = CGRectZero;
+    [value getValue:&rect size:sizeof(rect)];
+    return rect;
+}
+#endif
 #endif
 
 struct LHTextRun
@@ -70,6 +87,8 @@ struct LHDrawOp
 using LHGPUOp       = lhx::RenderOp;
 using LHGlyphSlot   = lhx::AtlasSlot;
 using LHGPURecorder = lhx::RenderRecorder;
+
+class LHEffectStore;
 
 class LHContainer : public litehtml::document_container
 {
@@ -132,6 +151,9 @@ class LHContainer : public litehtml::document_container
     void               delete_font(litehtml::uint_ptr hFont) override;
     static CTFontRef    native_font(litehtml::uint_ptr hFont);
     litehtml::pixel_t  text_width(const char* text, litehtml::uint_ptr hFont) override;
+    // Telegram (VENDOR.md edit 52): where draw_text puts each UTF-16 boundary of `text` (its length + 1 x offsets from
+    // the text's left), for WidgetRuntime's text selection; empty when the text cannot be laid out.
+    std::vector<float> caret_offsets(const char* text, litehtml::uint_ptr hFont);
     std::shared_ptr<litehtml::text_breaker> create_text_breaker(const std::string& text, litehtml::uint_ptr font) override;
     void draw_text(litehtml::uint_ptr hdc, const char* text, litehtml::uint_ptr hFont, litehtml::web_color color,
                    const litehtml::position& pos) override;
@@ -164,6 +186,10 @@ class LHContainer : public litehtml::document_container
     void draw_filtered(litehtml::uint_ptr hdc, const litehtml::filter_paint& filter, const std::function<void(litehtml::uint_ptr)>& paint) override;
     void draw_backdrop(litehtml::uint_ptr hdc, const litehtml::filter_paint& filter) override;
     std::function<CGImageRef(const void* owner, CGRect rect, CGFloat scaleX, CGFloat scaleY, bool flipped)> backdrop_source;
+    // Telegram (VENDOR.md edit 64): the store a host's paints share their filter and backdrop results through, and the
+    // backdrops a paint allows, registered in tree order before it draws.
+    LHEffectStore* effect_store = nullptr;
+    void           allow_backdrops(const std::vector<const void*>& owners);
     bool draw_cached(litehtml::uint_ptr hdc, const litehtml::position& box, uint64_t key, const std::function<void(litehtml::uint_ptr)>& paint) override;
     void draw_isolated(litehtml::uint_ptr hdc, const litehtml::position& box, const std::function<void(litehtml::uint_ptr)>& paint) override;
     bool sanitize_element(std::string& tag, bool svg, litehtml::string_map& attrs) override;
@@ -183,15 +209,38 @@ class LHContainer : public litehtml::document_container
     const SanitizerReport& sanitizer_report() const { return m_sanitizer_report; }
     void                   clear_sanitizer_report() { m_sanitizer_report.clear(); }
 
+#if !TARGET_OS_OSX
+    // Telegram's no-network policy (iOS): the requests this container refused (LHDocument.refusedRequests).
+    // An image URL that is not data:, icon: or sf: (both drawn from the bundled icon set) counts each time it
+    // reaches load_image, get_image_size, draw_image or draw_list_marker, and every import_css and link call
+    // counts. Nothing is fetched either way: there is no image provider on iOS.
+    size_t refused_requests() const { return m_refused_requests.load(std::memory_order_relaxed); }
+    bool   refuse_request(const std::string& url);
+#endif
+
     void set_caption(const char* caption) override {}
     void set_base_url(const char* base_url) override {}
+#if TARGET_OS_OSX
     void link(const std::shared_ptr<litehtml::document>& doc, const litehtml::element::ptr& el) override {}
+#else
+    void link(const std::shared_ptr<litehtml::document>& doc, const litehtml::element::ptr& el) override
+    {
+        m_refused_requests.fetch_add(1, std::memory_order_relaxed);
+    }
+#endif
     void on_anchor_click(const char* url, const litehtml::element::ptr& el) override;
     bool on_element_click(const litehtml::element::ptr& el) override;
     void on_mouse_event(const litehtml::element::ptr& el, litehtml::mouse_event event) override {}
     void set_cursor(const char* cursor) override;
     void transform_text(std::string& text, litehtml::text_transform tt) override;
+#if TARGET_OS_OSX
     void import_css(std::string& text, const std::string& url, std::string& baseurl) override {}
+#else
+    void import_css(std::string& text, const std::string& url, std::string& baseurl) override
+    {
+        m_refused_requests.fetch_add(1, std::memory_order_relaxed);
+    }
+#endif
     void set_clip_path(const litehtml::vector_path& path) override;
     bool point_in_clip_path(const litehtml::vector_path& path, litehtml::pixel_t x, litehtml::pixel_t y) override;
     void set_clip(const litehtml::position& pos, const litehtml::border_radiuses& bdr_radius) override;
@@ -206,6 +255,8 @@ class LHContainer : public litehtml::document_container
     void get_language(std::string& language, std::string& culture) const override;
 
   private:
+    // WidgetRuntime's iOS host and painter (LHHostSupport.h) draw a decoded image with this container's own clips.
+    friend class LHHostContainer;
     struct Font;
     struct Clip
     {
@@ -231,10 +282,13 @@ class LHContainer : public litehtml::document_container
     bool            m_controls_active = false;
     litehtml::web_color m_control_accent = litehtml::web_color(0, 122, 255);
     lhx::Sanitizer  m_sanitizer{nullptr};
+#if !TARGET_OS_OSX
+    std::atomic<size_t> m_refused_requests{0};
+#endif
     lhx::Painter*   m_painter = nullptr;
     void apply_clips(CGContextRef ctx, CGRect bounds) const;
     void record_op(OpHash& hash, CGRect ink, bool capture = true);
-    void paint_box_shadow(CGContextRef ctx, CGRect r, const litehtml::border_radiuses& radius, const litehtml::shadow_paint& shadow);
+    void paint_box_shadow(CGContextRef ctx, CGRect r, const litehtml::border_radiuses& radius, const litehtml::shadow_paint& shadow, bool clip = true);
     void flush_capture();
     bool record_solid(const litehtml::background_layer& layer, const litehtml::web_color& color);
     bool record_rounded(CGRect rect, const litehtml::border_radiuses& radius, const litehtml::web_color& color);

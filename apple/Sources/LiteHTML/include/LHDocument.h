@@ -1,4 +1,10 @@
 #import <Cocoa/Cocoa.h>
+#include <TargetConditionals.h>
+#if TARGET_OS_OSX
+#else
+#import <Foundation/Foundation.h>
+#import <CoreGraphics/CoreGraphics.h>
+#endif
 #import "LHTextFragment.h"
 
 NS_ASSUME_NONNULL_BEGIN
@@ -66,6 +72,8 @@ typedef struct LHKeyedRect {
 /// rebuilds itself from its own HTML if it is used again. Otherwise this parses `html` from scratch.
 - (instancetype)initWithHTML:(NSString *)html css:(nullable NSString *)css previous:(nullable LHDocument *)previous;
 - (instancetype)initWithHTML:(NSString *)html css:(nullable NSString *)css previous:(nullable LHDocument *)previous viewportSize:(CGSize)viewportSize NS_DESIGNATED_INITIALIZER;
+/// A document laid out against `viewportSize`, parsed whole (the iOS host builds no patched frames): what viewport units and media queries read.
+- (instancetype)initWithHTML:(NSString *)html css:(nullable NSString *)css viewportSize:(CGSize)viewportSize NS_DESIGNATED_INITIALIZER;
 @property (readonly) CGSize viewportSize;
 @property (readonly) BOOL dependsOnViewport;
 /// Patches `previous` in place with new inline style values, keyed by the value of `attribute`, without parsing HTML.
@@ -164,7 +172,9 @@ typedef struct LHKeyedRect {
 - (NSDictionary<NSString *, NSString *> *)computedStyleForAttribute:(NSString *)attribute value:(NSString *)value NS_SWIFT_NAME(computedStyle(attribute:value:));
 - (NSDictionary<NSString *, NSString *> *)computedStyleForAttribute:(NSString *)attribute value:(NSString *)value pseudo:(nullable NSString *)pseudo NS_SWIFT_NAME(computedStyle(attribute:value:pseudo:));
 - (nullable NSString *)customProperty:(NSString *)property attribute:(NSString *)attribute value:(NSString *)value NS_SWIFT_NAME(customProperty(_:attribute:value:));
+#if TARGET_OS_OSX
 - (nullable NSFont *)fontWithAttribute:(NSString *)attribute value:(NSString *)value lineHeight:(CGFloat *)lineHeight baseline:(CGFloat *)baseline NS_SWIFT_NAME(font(attribute:value:lineHeight:baseline:));
+#endif
 - (nullable NSDictionary<NSString *, NSNumber *> *)svgGeometry:(NSString *)method at:(double)distance attribute:(NSString *)attribute value:(NSString *)value NS_SWIFT_NAME(svgGeometry(_:at:attribute:value:));
 - (CGRect)svgBoxWithAttribute:(NSString *)attribute value:(NSString *)value NS_SWIFT_NAME(svgBox(attribute:value:));
 /// Skips elements that are not rendered (display: none on them or an ancestor): CSS animations and transitions do not
@@ -194,6 +204,14 @@ typedef struct LHKeyedRect {
 
 @property (readonly) NSDictionary<NSString *, NSNumber *> *sanitizerCounts;
 @property (readonly) NSArray<NSString *> *sanitizerDetails;
+#if !TARGET_OS_OSX
+/// Telegram's no-network policy (iOS): requests refused while this document was built, laid out or drawn. An image
+/// URL that is not data:, icon: or sf: counts each time it reaches the renderer, as does every stylesheet import and
+/// <link>; nothing is fetched. Markup the sanitizer removed never reaches the renderer (see sanitizerCounts), so this
+/// counts what got past it, such as the host's own css. A document made by patching starts from its predecessor's
+/// count, as it takes over the predecessor's renderer; the predecessor then reads 0, as its sanitizerCounts do.
+@property (readonly) NSUInteger refusedRequests;
+#endif
 
 @end
 

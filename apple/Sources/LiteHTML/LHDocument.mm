@@ -1,10 +1,15 @@
 #import "LHDocument.h"
+#if TARGET_OS_OSX
 #import <AppKit/AppKit.h>
+#else
+#import <CoreText/CoreText.h>
+#endif
 #import "LHGPUInternal.h"
 #import "LHDocumentPainting.h"
 
 #include "LHContainer.h"
 #include "LHImmutableBitmap.h"
+#include "telegram_master_css.h"
 #include "LHSimpleText.h"
 #include "lhx_local_paint_key.h"
 #include "lhx_alpha_bounds.h"
@@ -42,8 +47,11 @@ static double NowMs()
     return duration<double, std::milli>(steady_clock::now().time_since_epoch()).count();
 }
 
+// Telegram (VENDOR.md edit 12): the sheet is shared C++ now (litehtml::telegram_master_css), so host tests lay out
+// against the same one. The body below is set aside, unchanged.
 static const std::string &MasterCSS()
 {
+#if 0
     static const std::string& css = *new std::string([] {
         std::string s     = lh::master_css;
         size_t      start = s.find("a:link");
@@ -78,10 +86,15 @@ meter { width: 70px; }
         return s;
     }());
     return css;
+#else
+    return litehtml::telegram_master_css();
+#endif
 }
 
 static lh::web_color LHControlAccent()
 {
+    // iOS: no AppKit accent colour; the fallback below is the iOS system blue.
+#if TARGET_OS_OSX
     if(@available(macOS 10.14, *))
     {
         NSColor *accent = [NSColor.controlAccentColor colorUsingColorSpace:NSColorSpace.sRGBColorSpace];
@@ -89,6 +102,7 @@ static lh::web_color LHControlAccent()
             return lh::web_color((lh::byte)std::lround(accent.redComponent * 255), (lh::byte)std::lround(accent.greenComponent * 255),
                                  (lh::byte)std::lround(accent.blueComponent * 255));
     }
+#endif
     return lh::web_color(0, 122, 255);
 }
 
@@ -443,7 +457,11 @@ using OpIdentitySet = std::unordered_set<std::pair<uint64_t, size_t>, OpIdentity
     NSMutableArray<NSValue *>   *rects = [NSMutableArray array];
     auto add = [&](const LHDrawOp &op) {
         if(!CGRectIsNull(op.bounds) && !CGRectIsEmpty(op.bounds))
+#if TARGET_OS_OSX
             [rects addObject:[NSValue valueWithRect:NSRectFromCGRect(op.bounds)]];
+#else
+            [rects addObject:LHValueWithRect(op.bounds)];
+#endif
     };
     const auto &ida = [previous identities], &idb = [self identities];
     const auto &inA = [previous identitySet], &inB = [self identitySet];
@@ -498,7 +516,11 @@ using OpIdentitySet = std::unordered_set<std::pair<uint64_t, size_t>, OpIdentity
         const CGFloat lo = std::max(CGRectGetMinX(ra), std::min(CGRectGetMaxX(ra), CGRectGetMaxX(rb)) - b[i].edge - 2);
         const CGFloat hi = std::max(CGRectGetMaxX(ra), CGRectGetMaxX(rb));
         if(hi > lo)
+#if TARGET_OS_OSX
             [rects addObject:[NSValue valueWithRect:NSMakeRect(lo, CGRectGetMinY(rb), hi - lo, CGRectGetHeight(rb))]];
+#else
+            [rects addObject:LHValueWithRect(CGRectMake(lo, CGRectGetMinY(rb), hi - lo, CGRectGetHeight(rb)))];
+#endif
     }
     if(commonA != commonB)
     {
@@ -516,7 +538,11 @@ using OpIdentitySet = std::unordered_set<std::pair<uint64_t, size_t>, OpIdentity
                 continue;
             for(NSUInteger i = 0, n = rects.count; i < n; i++)
             {
+#if TARGET_OS_OSX
                 if(CGRectIntersectsRect(rects[i].rectValue, op.bounds))
+#else
+                if(CGRectIntersectsRect(LHRectValue(rects[i]), op.bounds))
+#endif
                 {
                     add(op);
                     break;
@@ -1066,6 +1092,25 @@ static std::string MasterWithCSS(NSString *css)
     return self;
 }
 
+- (instancetype)initWithHTML:(NSString *)html css:(NSString *)css viewportSize:(CGSize)viewportSize
+{
+    if((self = [super init]))
+    {
+        _html         = [html copy];
+        _lastMaxWidth = -1;
+        _cursor       = @"auto";
+        _viewportSize = viewportSize;
+        _container    = std::make_unique<LHContainer>();
+        _container->set_viewport(lh::position(0, 0, static_cast<float>(viewportSize.width), static_cast<float>(viewportSize.height)));
+        [self bindContainerLocked];
+
+        double t0 = NowMs();
+        _doc = lh::document::createFromString(lh::estring(html.UTF8String ?: ""), _container.get(), MasterWithCSS(css));
+        _parseMilliseconds = NowMs() - t0;
+    }
+    return self;
+}
+
 - (instancetype)initWithHTML:(NSString *)html css:(NSString *)css previous:(LHDocument *)previous
 {
     return [self initWithHTML:html css:css previous:previous viewportSize:previous ? previous.viewportSize : CGSizeZero];
@@ -1562,6 +1607,9 @@ static std::string MasterWithCSS(NSString *css)
         double  t0 = NowMs();
         CGFloat vw = std::min<CGFloat>(_preferredWidth, maxWidth);
         _container->set_viewport(lh::position(0, 0, static_cast<float>(vw), static_cast<float>(_viewportSize.height)));
+        // Telegram (VENDOR.md edit 7): media queries and viewport units follow the width laid out at
+        // (litehtml::document::viewport_changed); upstream's viewport reuse (b5878f9) does not re-evaluate them.
+        _doc->viewport_changed();
         _doc->render(static_cast<float>(vw));
         CGFloat extent = std::ceil(_doc->width().value());
         if(vw >= maxWidth - 0.5 || extent <= vw + 0.5)
@@ -1578,6 +1626,8 @@ static std::string MasterWithCSS(NSString *css)
 
     double t0 = NowMs();
     _container->set_viewport(lh::position(0, 0, static_cast<float>(maxWidth), static_cast<float>(_viewportSize.height)));
+    // Telegram (VENDOR.md edit 7): as above; the narrower viewports of the shrink-to-fit passes below are not the frame's.
+    _doc->viewport_changed();
     lh::pixel_t natural = _doc->render(static_cast<float>(maxWidth));
     CGFloat     width   = maxWidth;
     if(natural.value() > 0 && natural.value() < maxWidth)
@@ -1796,14 +1846,25 @@ static std::string MasterWithCSS(NSString *css)
             if(CGRectIsNull(hitViewport))
                 hitViewport = CGRectZero;
             result[@(v)] = @{
+#if TARGET_OS_OSX
                 @"wheel": @(css.get_overflow_x() == lh::overflow_auto || css.get_overflow_x() == lh::overflow_scroll || css.get_overflow_y() == lh::overflow_auto || css.get_overflow_y() == lh::overflow_scroll || ri->src_el()->tag() == lh::_textarea_),
                 @"wheelX": @(css.get_overflow_x() == lh::overflow_auto || css.get_overflow_x() == lh::overflow_scroll || ri->src_el()->tag() == lh::_textarea_),
                 @"wheelY": @(css.get_overflow_y() == lh::overflow_auto || css.get_overflow_y() == lh::overflow_scroll || ri->src_el()->tag() == lh::_textarea_),
                 @"hitViewport": [NSValue valueWithRect:hitViewport],
                 @"viewport": [NSValue valueWithRect:NSMakeRect(placement.x.value(), placement.y.value(), placement.width.value(), placement.height.value())],
                 @"content": [NSValue valueWithSize:NSMakeSize(content.width.value(), content.height.value())],
+#else
+                @"wheel": @(css.get_overflow() != lh::overflow_hidden || ri->src_el()->tag() == lh::_textarea_),
+                @"hitViewport": LHValueWithRect(hitViewport),
+                @"viewport": LHValueWithRect(CGRectMake(placement.x.value(), placement.y.value(), placement.width.value(), placement.height.value())),
+                @"content": LHValueWithSize(CGSizeMake(content.width.value(), content.height.value())),
+#endif
                 @"sticky": @(hasSticky(ri)),
+#if TARGET_OS_OSX
                 @"offset": [NSValue valueWithPoint:NSMakePoint(ri->get_scroll_left().value(), ri->get_scroll_top().value())],
+#else
+                @"offset": LHValueWithPoint(CGPointMake(ri->get_scroll_left().value(), ri->get_scroll_top().value())),
+#endif
                 @"radii": @[@(radius.top_left_x.value()), @(radius.top_left_y.value()), @(radius.top_right_x.value()), @(radius.top_right_y.value()),
                             @(radius.bottom_right_x.value()), @(radius.bottom_right_y.value()), @(radius.bottom_left_x.value()), @(radius.bottom_left_y.value())],
             };
@@ -3218,6 +3279,7 @@ static CGRect LHElementRasterBounds(const std::shared_ptr<lh::render_item>& root
     return box;
 }
 
+#if TARGET_OS_OSX
 - (nullable NSFont *)fontWithAttribute:(NSString *)attribute value:(NSString *)value lineHeight:(CGFloat *)lineHeight baseline:(CGFloat *)baseline
 {
     std::lock_guard<std::mutex> guard(_lock);
@@ -3232,6 +3294,7 @@ static CGRect LHElementRasterBounds(const std::shared_ptr<lh::render_item>& root
     }
     return ri ? (__bridge NSFont *)LHContainer::native_font(ri->css().get_font()) : nil;
 }
+#endif
 
 - (NSDictionary<NSString *, NSString *> *)computedStyleForAttribute:(NSString *)attribute value:(NSString *)value
 {
@@ -3550,6 +3613,34 @@ static std::string LHCustomPropertyText(const lh::css_token_vector &tokens)
     const char *key = name.UTF8String;
     std::function<void(const std::shared_ptr<lh::render_item> &, const lh::transform_matrix&)> visit = [&](const std::shared_ptr<lh::render_item> &ri, const lh::transform_matrix& ancestors) {
         const auto matrix = transformed ? ri->get_visual_transform().then(ancestors) : lh::transform_matrix{};
+#if !TARGET_OS_OSX
+        // Telegram (iOS): an inline element's render item has no box of its own (its position is never set),
+        // so its placement is a point. Its border box is the union of its line fragments, which already hold
+        // its padding and borders, in the space of its position (as getBoundingClientRect has it).
+        if(const char *value = ri->src_el()->get_attr(key))
+        {
+            CGRect fragments = CGRectNull;
+            const bool isInline = ri->for_inline_boxes([&](const lh::position &b, bool, bool) {
+                fragments = CGRectUnion(fragments, CGRectMake(b.x.value(), b.y.value(), b.width.value(), b.height.value()));
+                return true;
+            });
+            if(isInline)
+            {
+                const lh::position p   = ri->get_placement();
+                const lh::position pos = ri->pos();
+                const CGRect       box = CGRectIsNull(fragments) ? CGRectMake(p.x.value(), p.y.value(), 0, 0)
+                                                                 : CGRectOffset(fragments, p.x.value() - pos.x.value(), p.y.value() - pos.y.value());
+                auto it = boxes.find(value);
+                if(it == boxes.end())
+                    boxes.emplace(value, box);
+                else
+                    it->second = CGRectUnion(it->second, box);
+                for(const auto &child : ri->children())
+                    visit(child, matrix);
+                return;
+            }
+        }
+#endif
         if(const char *value = ri->src_el()->get_attr(key))
         {
             const CGAffineTransform affine = CGAffineTransformMake(matrix.a, matrix.b, matrix.c, matrix.d, matrix.tx, matrix.ty);
@@ -3589,7 +3680,11 @@ static std::string LHCustomPropertyText(const lh::css_token_vector &tokens)
             it->second = CGRectUnion(it->second, box);
     }];
     for(const auto &entry : boxes)
+#if TARGET_OS_OSX
         result[@(entry.first.c_str())] = [NSValue valueWithRect:NSRectFromCGRect(entry.second)];
+#else
+        result[@(entry.first.c_str())] = LHValueWithRect(entry.second);
+#endif
     return result;
 }
 
@@ -4210,6 +4305,14 @@ static bool LHUserSelectable(lh::element::ptr el)
     return details;
 }
 
+#if !TARGET_OS_OSX
+- (NSUInteger)refusedRequests
+{
+    std::lock_guard<std::mutex> guard(_lock);
+    return _container ? _container->refused_requests() : 0;
+}
+#endif
+
 @end
 
 @implementation LHDocument (Painting)
@@ -4279,7 +4382,7 @@ bool LHRenderingSVGImage(void)
     return SVGImageDepth > 0;
 }
 
-CGImageRef LHCreateSVGImage(const std::string &markup, CGSize *size)
+CGImageRef LHCreateSVGImage(const std::string &markup, CGSize *size, size_t maxPixelBytes)
 {
     int         &depth      = SVGImageDepth;
     const size_t kMaxMarkup = 2 * 1024 * 1024;
@@ -4303,9 +4406,14 @@ CGImageRef LHCreateSVGImage(const std::string &markup, CGSize *size)
         if(!CGRectIsNull(box) && box.size.width > 0 && box.size.height > 0 && box.size.width <= 16384 && box.size.height <= 16384)
         {
             CGFloat scale = std::min<CGFloat>(2, std::min(4096 / box.size.width, 4096 / box.size.height));
-            image         = [doc copyImageWithMaxWidth:300 rect:box scale:scale];
-            if(image && size)
-                *size = box.size;
+            // Its raster's bytes, checked before anything is drawn.
+            const double bytes = std::ceil(box.size.width * scale) * std::ceil(box.size.height * scale) * 4;
+            if(bytes <= double(maxPixelBytes))
+            {
+                image = [doc copyImageWithMaxWidth:300 rect:box scale:scale];
+                if(image && size)
+                    *size = box.size;
+            }
         }
     }
     depth--;

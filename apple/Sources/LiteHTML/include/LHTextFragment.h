@@ -1,4 +1,10 @@
 #import <Cocoa/Cocoa.h>
+#include <TargetConditionals.h>
+#if TARGET_OS_OSX
+#else
+#import <Foundation/Foundation.h>
+#import <CoreGraphics/CoreGraphics.h>
+#endif
 
 NS_ASSUME_NONNULL_BEGIN
 

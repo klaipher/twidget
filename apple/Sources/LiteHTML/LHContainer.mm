@@ -1,8 +1,16 @@
 #import <Cocoa/Cocoa.h>
+#include <TargetConditionals.h>
+#if TARGET_OS_OSX
+#else
+#import <Foundation/Foundation.h>
+#import <CoreGraphics/CoreGraphics.h>
+#import <CoreText/CoreText.h>
+#endif
 #import <ImageIO/ImageIO.h>
 #include <zlib.h>
 
 #include "LHContainer.h"
+#include "LHHostSupport.h"
 #include "render_item.h"
 #include "LHFilters.h"
 #include "LHSimpleText.h"
@@ -12,6 +20,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstring>
+#include <condition_variable>
 #include <list>
 #include <memory>
 #include <mutex>
@@ -110,6 +119,56 @@ static void SetStroke(CGContextRef ctx, const lh::web_color& c)
     CGContextSetStrokeColorWithColor(ctx, ContextColor(ctx, c));
 }
 
+// Telegram (VENDOR.md edit 36): Blink's dash metrics (StyledStrokeData). A dash is 2w long with a gap of w from 3px up,
+// 3w and 2w below; a dot is round and w across with a gap of w. The gap is then fitted (SelectBestDashGap) so an open
+// side starts and ends with a dash and a closed path closes on one. False when fewer than two fit: the line is solid.
+static bool FitDashes(CGFloat length, CGFloat w, bool dotted, bool closed, CGFloat& dash, CGFloat& gap)
+{
+    dash                = dotted ? w : w * (w >= 3 ? 2 : 3);
+    const CGFloat ideal = dotted ? w : w * (w >= 3 ? 1 : 2);
+    if(!(length > 0) || !(dash > 0))
+        return false;
+    const CGFloat fewer = std::floor((closed ? length : length + ideal) / (dash + ideal));
+    if(fewer < 2)
+        return false;
+    const CGFloat more      = fewer + 1;
+    const CGFloat fewerGap  = (length - fewer * dash) / (closed ? fewer : fewer - 1);
+    const CGFloat moreGap   = (length - more * dash) / (closed ? more : more - 1);
+    gap = moreGap <= 0 || std::fabs(fewerGap - ideal) < std::fabs(moreGap - ideal) ? fewerGap : moreGap;
+    return gap > 0;
+}
+
+// Telegram (VENDOR.md edit 36): strokes a→z, w wide, dashed or dotted as FitDashes fits it (solid when nothing fits).
+// Dots are centred from w/2 to the length less w/2, so the first and last touch the ends.
+static void StrokeStyledSegment(CGContextRef ctx, CGPoint a, CGPoint z, CGFloat w, bool dotted)
+{
+    const CGFloat length = std::hypot(z.x - a.x, z.y - a.y);
+    CGFloat       dash = 0, gap = 0;
+    CGContextSetLineWidth(ctx, w);
+    if(!FitDashes(length, w, dotted, false, dash, gap))
+    {
+        CGContextSetLineCap(ctx, kCGLineCapButt);
+        CGContextSetLineDash(ctx, 0, nullptr, 0);
+    } else if(dotted)
+    {
+        const CGFloat ux = (z.x - a.x) / length, uy = (z.y - a.y) / length;
+        // The end goes a hair past the last dot's centre, so rounding cannot drop it.
+        a                  = CGPointMake(a.x + ux * w / 2, a.y + uy * w / 2);
+        z                  = CGPointMake(z.x - ux * (w / 2 - 0.01), z.y - uy * (w / 2 - 0.01));
+        CGFloat pattern[2] = {0, dash + gap};
+        CGContextSetLineCap(ctx, kCGLineCapRound);
+        CGContextSetLineDash(ctx, 0, pattern, 2);
+    } else
+    {
+        CGFloat pattern[2] = {dash, gap};
+        CGContextSetLineCap(ctx, kCGLineCapButt);
+        CGContextSetLineDash(ctx, 0, pattern, 2);
+    }
+    CGContextMoveToPoint(ctx, a.x, a.y);
+    CGContextAddLineToPoint(ctx, z.x, z.y);
+    CGContextStrokePath(ctx);
+}
+
 static void AddRoundedRect(CGMutablePathRef path, CGRect r, const lh::border_radiuses& rad)
 {
     if(r.size.width <= 0 || r.size.height <= 0)
@@ -138,6 +197,27 @@ static void AddRoundedRect(CGMutablePathRef path, CGRect r, const lh::border_rad
     if(tlx > 0 && tly > 0)
         CGPathAddCurveToPoint(path, nullptr, x0, y0 + tly - tly * k, x0 + tlx - tlx * k, y0, x0 + tlx, y0);
     CGPathCloseSubpath(path);
+}
+
+// Telegram (VENDOR.md edit 36): the length of AddRoundedRect's path (each corner a quarter ellipse, by Ramanujan's
+// approximation), for fitting dashes to a closed rounded border.
+static CGFloat RoundedRectLength(CGRect r, const lh::border_radiuses& rad)
+{
+    if(r.size.width <= 0 || r.size.height <= 0)
+        return 0;
+    const CGFloat hw = r.size.width / 2, hh = r.size.height / 2;
+    auto clampx = [&](lh::pixel_t v) { return std::min<CGFloat>(std::max<CGFloat>(F(v), 0), hw); };
+    auto clampy = [&](lh::pixel_t v) { return std::min<CGFloat>(std::max<CGFloat>(F(v), 0), hh); };
+    const CGFloat rx[4] = {clampx(rad.top_left_x), clampx(rad.top_right_x), clampx(rad.bottom_right_x), clampx(rad.bottom_left_x)};
+    const CGFloat ry[4] = {clampy(rad.top_left_y), clampy(rad.top_right_y), clampy(rad.bottom_right_y), clampy(rad.bottom_left_y)};
+    CGFloat length = 2 * (r.size.width + r.size.height);
+    for(int i = 0; i < 4; i++)
+    {
+        const CGFloat a = rx[i], b = ry[i];
+        length -= a + b;
+        length += M_PI / 4 * (3 * (a + b) - std::sqrt((3 * a + b) * (a + 3 * b)));
+    }
+    return length;
 }
 
 static lh::margins Uniform(CGFloat v)
@@ -321,6 +401,7 @@ ImageStore& Store()
 
 const size_t kMaxDataImageBytes = 24 * 1024 * 1024;
 
+#if TARGET_OS_OSX
 CGImageRef CreateCGImageFromNSImage(NSImage* image, CGSize logical, CGFloat scale, NSColor* tint)
 {
     if(!std::isfinite(logical.width) || !std::isfinite(logical.height) || logical.width <= 0 || logical.height <= 0)
@@ -372,6 +453,7 @@ NSColor* ColorFromHex(NSString* hex)
                                 blue:(v & 0xff) / 255.0
                                alpha:1.0];
 }
+#endif
 
 ImageHandle AdoptImage(CGImageRef image, CGSize size)
 {
@@ -535,13 +617,47 @@ CGImageRef CreateImageKeepingRows(CGImageRef image, size_t keep)
     return out ?: CGImageRetain(image);
 }
 
-ImageHandle LoadImageFromData(NSData* data, bool isSVG)
+#if !TARGET_OS_OSX
+// Telegram's image policy (iOS): a data image is decoded only when its bytes are PNG, JPEG, GIF or WebP,
+// whatever the data: URL's MIME type says, and when its header says it is at most 4096 px a side and
+// 16 Mpx (and at most maxPixelBytes at 4 bytes a pixel), read before anything is decoded. Fails closed when
+// ImageIO cannot tell.
+bool TelegramImageSourceAllowed(CGImageSourceRef src, size_t maxPixelBytes = ~size_t(0))
+{
+    CFStringRef type = CGImageSourceGetType(src);
+    if(!type || !(CFEqual(type, CFSTR("public.png")) || CFEqual(type, CFSTR("public.jpeg")) ||
+                  CFEqual(type, CFSTR("com.compuserve.gif")) || CFEqual(type, CFSTR("org.webmproject.webp"))))
+        return false;
+    CFDictionaryRef properties = CGImageSourceCopyPropertiesAtIndex(src, 0, nullptr);
+    if(!properties)
+        return false;
+    auto      width  = static_cast<CFNumberRef>(CFDictionaryGetValue(properties, kCGImagePropertyPixelWidth));
+    auto      height = static_cast<CFNumberRef>(CFDictionaryGetValue(properties, kCGImagePropertyPixelHeight));
+    long long w = 0, h = 0;
+    const bool known = width && height && CFGetTypeID(width) == CFNumberGetTypeID() &&
+                       CFGetTypeID(height) == CFNumberGetTypeID() && CFNumberGetValue(width, kCFNumberLongLongType, &w) &&
+                       CFNumberGetValue(height, kCFNumberLongLongType, &h);
+    CFRelease(properties);
+    return known && w > 0 && h > 0 && !(w > 4096 || h > 4096 || w * h > (16ll << 20)) &&
+           double(w) * double(h) * 4 <= double(maxPixelBytes);
+}
+#endif
+
+ImageHandle LoadImageFromData(NSData* data, bool isSVG, size_t maxPixelBytes = ~size_t(0))
 {
     if(!data)
         return {};
     if(!isSVG)
     {
         CGImageSourceRef src = CGImageSourceCreateWithData((__bridge CFDataRef)data, nullptr);
+#if !TARGET_OS_OSX
+        // Telegram's image policy (VENDOR.md edit 5).
+        if(src && !TelegramImageSourceAllowed(src, maxPixelBytes))
+        {
+            CFRelease(src);
+            return {};
+        }
+#endif
         if(src)
         {
             CGImageRef image = CGImageSourceCreateImageAtIndex(src, 0, nullptr);
@@ -560,7 +676,7 @@ ImageHandle LoadImageFromData(NSData* data, bool isSVG)
     }
     CGSize      size   = CGSizeZero;
     std::string markup(static_cast<const char*>(data.bytes), data.length);
-    CGImageRef  image  = LHCreateSVGImage(markup, &size);
+    CGImageRef  image  = LHCreateSVGImage(markup, &size, maxPixelBytes);
     ImageHandle handle = image ? AdoptImage(image, size) : ImageHandle();
     if(handle)
         handle.aspect = SVGRootAspect(markup);
@@ -590,6 +706,8 @@ ImageHandle LoadDataURI(const std::string& url)
 
 ImageHandle LoadSymbol(const std::string& url)
 {
+    // iOS: no AppKit symbol images; LookupImage resolves an `sf:` URL through the icon aliases instead.
+#if TARGET_OS_OSX
     if(@available(macOS 11.0, *))
     {
         NSURLComponents* comps =
@@ -631,6 +749,7 @@ ImageHandle LoadSymbol(const std::string& url)
         sym = [sym imageWithSymbolConfiguration:cfg] ?: sym;
         return AdoptImage(CreateCGImageFromNSImage(sym, sym.size, 2.0, tinted ? tint : nil), sym.size);
     }
+#endif
     return {};
 }
 
@@ -657,11 +776,14 @@ ImageHandle LoadIcon(const std::string& url)
     return image ? AdoptImage(image, size) : ImageHandle();
 }
 
+#if TARGET_OS_OSX
 NSImage* (^g_provider)(NSString* url) = nil;
 std::mutex& g_providerLock = *new std::mutex;
+#endif
 
 ImageHandle LoadProvided(const std::string& url)
 {
+#if TARGET_OS_OSX
     NSImage* (^provider)(NSString* url) = nil;
     {
         std::lock_guard<std::mutex> guard(g_providerLock);
@@ -682,6 +804,10 @@ ImageHandle LoadProvided(const std::string& url)
         }
     }
     return AdoptImage(CreateCGImageFromNSImage(image, image.size, 2.0, nil), image.size);
+#else
+    // iOS: there is no image provider (its API is NSImage), so only data:, icon: and sf: URLs load.
+    return {};
+#endif
 }
 
 ImageHandle LookupImage(const std::string& url)
@@ -760,6 +886,7 @@ ImageHandle LookupImage(const std::string& url)
 }
 }
 
+#if TARGET_OS_OSX
 void LHRegisterAppImage(NSString* name, NSImage* image)
 {
     ImageHandle img = AdoptImage(CreateCGImageFromNSImage(image, image.size, 2.0, nil), image.size);
@@ -768,6 +895,7 @@ void LHRegisterAppImage(NSString* name, NSImage* image)
     std::lock_guard<std::mutex> guard(store.lock);
     store.images[key] = img;
 }
+#endif
 
 CGImageRef LHCopyImageForURL(NSString* url)
 {
@@ -785,6 +913,7 @@ CGSize LHImageSizeForURL(NSString* url)
     return img ? img.size : CGSizeZero;
 }
 
+#if TARGET_OS_OSX
 NSImage* (^LHImageProvider(void))(NSString* url)
 {
     std::lock_guard<std::mutex> guard(g_providerLock);
@@ -796,6 +925,7 @@ void LHSetImageProvider(NSImage* (^provider)(NSString* url))
     std::lock_guard<std::mutex> guard(g_providerLock);
     g_provider = [provider copy];
 }
+#endif
 
 void LHSetPortableSymbols(bool portable)
 {
@@ -941,24 +1071,33 @@ static const CGFloat kMaxTextShadowOffset = 400;
 static const size_t kMaxBackdrops = 8;
 static const size_t kMaxTextShadows = 8;
 
+// Device pixels per user unit along the CTM's longer axis (its columns' length: rotated or skewed too).
+static CGFloat DeviceScale(CGContextRef ctx)
+{
+    CGAffineTransform m = CGContextGetCTM(ctx);
+    return std::max(std::hypot(m.a, m.b), std::hypot(m.c, m.d));
+}
+
 static bool DrawDownsampled(CGContextRef ctx, CGRect r, std::string key, CGFloat blur, const std::function<void(CGContextRef)>& paint)
 {
     CGAffineTransform m = CGContextGetCTM(ctx);
-    if(std::fabs(m.b) > 1e-9 || std::fabs(m.c) > 1e-9 || r.size.width <= 0 || r.size.height <= 0)
+    if(r.size.width <= 0 || r.size.height <= 0)
         return false;
-    CGRect device = CGContextConvertRectToDeviceSpace(ctx, r);
-    CGFloat sx = std::fabs(m.a), sy = std::fabs(m.d);
-    CGFloat pixels = device.size.width * device.size.height;
+    // Telegram (VENDOR.md edit 65): any CTM, rotated or skewed too: the raster is r in user space, sx device pixels a
+    // user unit along x and sy along y (the CTM's columns), and is drawn through the CTM.
+    CGFloat sx = std::hypot(m.a, m.b), sy = std::hypot(m.c, m.d);
+    CGFloat pixels = r.size.width * sx * r.size.height * sy;
     CGFloat k = std::min<CGFloat>(1, 24 / std::max<CGFloat>(blur * std::max(sx, sy), 1));
     if(k >= 0.999 || !(k > 0))
         return false;
     k = std::min<CGFloat>(k, std::sqrt((1 << 20) / std::max<CGFloat>(pixels, 1)));
-    size_t pw = (size_t)std::max<double>(1, std::ceil(device.size.width * k)), ph = (size_t)std::max<double>(1, std::ceil(device.size.height * k));
+    size_t pw = (size_t)std::max<double>(1, std::ceil(r.size.width * sx * k)), ph = (size_t)std::max<double>(1, std::ceil(r.size.height * sy * k));
     CGFloat kx = pw / std::max<CGFloat>(r.size.width, 1e-6), ky = ph / std::max<CGFloat>(r.size.height, 1e-6);
     AppendNumber(key, (double)pw);
     AppendNumber(key, (double)ph);
-    AppendNumber(key, sx);
-    AppendNumber(key, sy);
+    // Rounded: a turned CTM's column lengths carry float noise.
+    AppendNumber(key, std::round(sx * 1e6) / 1e6);
+    AppendNumber(key, std::round(sy * 1e6) / 1e6);
     AppendNumber(key, m.d < 0 ? -1 : 1);
     CGColorSpaceRef space = CGBitmapContextGetColorSpace(ctx);
     if(!space || CGColorSpaceGetModel(space) != kCGColorSpaceModelRGB)
@@ -1253,6 +1392,7 @@ struct LHContainer::Font
     int             smoothing = lh::font_smoothing_auto;
 };
 
+#if TARGET_OS_OSX
 static NSFontWeight NSWeightFromCSS(int w)
 {
     static const NSFontWeight table[] = {NSFontWeightUltraLight, NSFontWeightThin, NSFontWeightLight,
@@ -1397,6 +1537,260 @@ static NSFont* ResolveFont(const std::string& families, CGFloat size, int cssWei
     }
     return font;
 }
+#else
+// iOS: the same resolution through CoreText (NSFont, NSFontManager and NSFontDescriptor are AppKit),
+// in the same order and with the same generic-family names. Every CTFontRef here is +1; a helper
+// that hands back a different font releases the one it was given. Public CoreText has no route to
+// the system serif, rounded or monospaced designs, so those take what the macOS functions fall back
+// to before 10.15: Times New Roman, the plain system font, Menlo.
+
+// kCTFontWeightTrait values for CSS 100 ... 900: NSFontWeightUltraLight ... NSFontWeightBlack, as NSWeightFromCSS maps them.
+static const CGFloat kWeightTraits[] = {-0.8, -0.6, -0.4, 0.0, 0.23, 0.3, 0.4, 0.56, 0.62};
+
+static CGFloat CTWeightFromCSS(int w)
+{
+    return kWeightTraits[std::clamp((w + 50) / 100, 1, 9) - 1];
+}
+
+static NSInteger ManagerWeightFromCSS(int w)
+{
+    static const NSInteger table[] = {2, 3, 4, 5, 6, 8, 9, 10, 11};
+    return table[std::clamp((w + 50) / 100, 1, 9) - 1];
+}
+
+// NSFontManager's weight (0-15) of a face whose kCTFontWeightTrait is `weight`, as weightOfFont: reports
+// it on macOS: UltraLight 2, Thin and Light 3, Regular 5, Medium 6, Semibold 8, Bold 9, Heavy 10, Black 11.
+static NSInteger ManagerWeightFromCT(CGFloat weight)
+{
+    static const NSInteger faces[] = {2, 3, 3, 5, 6, 8, 9, 10, 11};
+    int                    nearest = 0;
+    for(int i = 1; i < 9; i++)
+        if(std::fabs(kWeightTraits[i] - weight) < std::fabs(kWeightTraits[nearest] - weight))
+            nearest = i;
+    return faces[nearest];
+}
+
+static bool HasWeightAxis(CTFontRef font)
+{
+    static std::mutex&                            mutex = *new std::mutex;
+    static std::unordered_map<std::string, bool>& known = *new std::unordered_map<std::string, bool>;
+    const int                                    axis = 0x77676874;
+    NSString*                                    name = CFBridgingRelease(CTFontCopyPostScriptName(font));
+    const std::string                            key  = name.UTF8String ?: "";
+    if(!key.empty())
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        auto                        it = known.find(key);
+        if(it != known.end())
+            return it->second;
+    }
+    NSArray* axes      = CFBridgingRelease(CTFontCopyVariationAxes(font));
+    bool     hasWeight = false;
+    for(NSDictionary* item in axes)
+        hasWeight = hasWeight || [item[(__bridge NSString*)kCTFontVariationAxisIdentifierKey] intValue] == axis;
+    if(!key.empty())
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        if(known.size() > 512)
+            known.clear();
+        known.emplace(key, hasWeight);
+    }
+    return hasWeight;
+}
+
+static CTFontRef WithCSSWeight(CTFontRef font, int cssWeight)
+{
+    if(!font)
+        return font;
+    const int axis = 0x77676874;
+    if(!HasWeightAxis(font))
+        return font;
+    CTFontDescriptorRef base   = CTFontCopyFontDescriptor(font);
+    CTFontDescriptorRef varied = CTFontDescriptorCreateCopyWithVariation(base, (__bridge CFNumberRef) @(axis), std::clamp(cssWeight, 1, 1000));
+    CFRelease(base);
+    CTFontRef result = CTFontCreateWithFontDescriptor(varied, CTFontGetSize(font), nullptr);
+    CFRelease(varied);
+    if(!result)
+        return font;
+    CFRelease(font);
+    return result;
+}
+
+// [NSFont systemFontOfSize:size weight:NSFontWeightRegular]: WithCSSWeight then sets the weight on the
+// font's weight axis, as on macOS. A system font without one (iOS 27's has one) takes the weight trait.
+static CTFontRef SystemFont(CGFloat size, int cssWeight)
+{
+    CTFontRef base = CTFontCreateUIFontForLanguage(kCTFontUIFontSystem, size, nullptr);
+    if(!base || HasWeightAxis(base))
+        return base;
+    NSDictionary*       traits   = @{(__bridge id)kCTFontWeightTrait: @(CTWeightFromCSS(cssWeight))};
+    NSDictionary*       attrs    = @{(__bridge id)kCTFontTraitsAttribute: traits};
+    CTFontDescriptorRef plain    = CTFontCopyFontDescriptor(base);
+    CTFontDescriptorRef weighted = CTFontDescriptorCreateCopyWithAttributes(plain, (__bridge CFDictionaryRef)attrs);
+    CFRelease(plain);
+    CTFontRef font = CTFontCreateWithFontDescriptor(weighted, size, nullptr);
+    CFRelease(weighted);
+    if(!font)
+        return base;
+    CFRelease(base);
+    return font;
+}
+
+// ResolveFont's NSFontManager chain: nil when `family` is not installed (CTFontCreateWithName would
+// substitute another font instead), else the member that chain picks (compared against it on macOS 27),
+// in its order:
+// 1. fontWithFamily:traits:(italic | bold) weight:mw: a member with the requested italic, else this
+//    step finds nothing. Among those, from CSS 600 up (NSBoldFontMask, which makes NSFontManager
+//    ignore the weight) a face with the bold trait and at least Bold's weight (9), but a family with
+//    no such face still answers (Futura 700 italic is MediumItalic); else the nearest weight on its
+//    0-15 scale, a tie going to the face nearer regular (5).
+// 2. Else fontWithFamily:traits:0 weight:mw: the traits are dropped, bold's preference with them, and
+//    the face nearest mw is taken (an upright one first). So an italic request in a family with no
+//    italic face keeps its CSS weight (American Typewriter 600 italic is Semibold, then skewed).
+// The chain's third step (traits:0 weight:5) is never reached: the second always finds a member.
+static CTFontRef FamilyFont(NSString* family, CGFloat size, int cssWeight, bool italic)
+{
+    NSDictionary*       attrs     = @{(__bridge id)kCTFontFamilyNameAttribute: family};
+    CTFontDescriptorRef query     = CTFontDescriptorCreateWithAttributes((__bridge CFDictionaryRef)attrs);
+    NSSet*              mandatory = [NSSet setWithObject:(__bridge id)kCTFontFamilyNameAttribute];
+    NSArray*            members   = CFBridgingRelease(CTFontDescriptorCreateMatchingFontDescriptors(query, (__bridge CFSetRef)mandatory));
+    CFRelease(query);
+    struct Member
+    {
+        id        descriptor;
+        bool      italic, bold;
+        NSInteger weight;
+    };
+    std::vector<Member> faces;
+    for(id member in members)
+    {
+        NSDictionary*  traits   = CFBridgingRelease(CTFontDescriptorCopyAttribute((__bridge CTFontDescriptorRef)member, kCTFontTraitsAttribute));
+        const uint32_t symbolic = [traits[(__bridge id)kCTFontSymbolicTrait] unsignedIntValue];
+        faces.push_back({member, (symbolic & kCTFontTraitItalic) != 0, (symbolic & kCTFontTraitBold) != 0,
+                         ManagerWeightFromCT([traits[(__bridge id)kCTFontWeightTrait] doubleValue])});
+    }
+    if(faces.empty())
+        return nullptr;
+    const bool      bold = cssWeight >= 600;
+    const NSInteger mw   = ManagerWeightFromCSS(cssWeight);
+    auto            pick = [&](bool wantItalic, bool wantBold, NSInteger target) {
+        const Member* best = nullptr;
+        for(const Member& face : faces)
+        {
+            auto better = [&] {
+                if(face.italic != best->italic)
+                    return face.italic == wantItalic;
+                if(wantBold && face.bold != best->bold)
+                    return face.bold;
+                if(std::abs(face.weight - target) != std::abs(best->weight - target))
+                    return std::abs(face.weight - target) < std::abs(best->weight - target);
+                return std::abs(face.weight - 5) < std::abs(best->weight - 5);
+            };
+            if(!best || better())
+                best = &face;
+        }
+        return best;
+    };
+    const Member* chosen = pick(italic, bold, bold ? std::max<NSInteger>(mw, 9) : mw);
+    if(chosen->italic != italic)
+        chosen = pick(false, false, mw);
+    return CTFontCreateWithFontDescriptor((__bridge CTFontDescriptorRef)chosen->descriptor, size, nullptr);
+}
+
+// macOS's fallback before 10.15 is Menlo by weight; the CSS weight picks the face here, since Menlo has no weight axis.
+static CTFontRef MonospacedFont(CGFloat size, int cssWeight)
+{
+    const bool bold = CTWeightFromCSS(cssWeight) >= kWeightTraits[5]; // NSFontWeightSemibold
+    return CTFontCreateWithName(bold ? CFSTR("Menlo-Bold") : CFSTR("Menlo-Regular"), size, nullptr);
+}
+
+// macOS's fallback before 10.15: Times New Roman for serif (its weight from the family, as it has no
+// weight axis), the plain system font for rounded.
+static CTFontRef SystemFontWithDesign(CGFloat size, int cssWeight, bool serif)
+{
+    if(serif)
+    {
+        if(CTFontRef times = FamilyFont(@"Times New Roman", size, cssWeight, false))
+            return times;
+    }
+    return SystemFont(size, cssWeight);
+}
+
+static CTFontRef ResolveFont(const std::string& families, CGFloat size, int cssWeight, bool italic)
+{
+    CTFontRef font = nullptr;
+
+    NSArray<NSString*>* tokens = [@(families.c_str()) componentsSeparatedByString:@","];
+    NSCharacterSet*     trim   = [NSCharacterSet characterSetWithCharactersInString:@" \t\r\n\"'"];
+    for(NSString* raw in tokens)
+    {
+        NSString* name  = [raw stringByTrimmingCharactersInSet:trim];
+        NSString* lower = name.lowercaseString;
+        if(name.length == 0)
+            continue;
+
+        if([@[@"-apple-system", @"system-ui", @"blinkmacsystemfont", @"ui-sans-serif",
+              @"sf pro", @"sf pro text", @"sf pro display"] containsObject:lower])
+            font = WithCSSWeight(SystemFont(size, cssWeight), cssWeight);
+        else if([@[@"ui-monospace", @"sf mono"] containsObject:lower])
+            font = WithCSSWeight(MonospacedFont(size, cssWeight), cssWeight);
+        else if([lower isEqualToString:@"ui-serif"])
+            font = WithCSSWeight(SystemFontWithDesign(size, cssWeight, true), cssWeight);
+        else if([@[@"ui-rounded", @"sf pro rounded"] containsObject:lower])
+            font = WithCSSWeight(SystemFontWithDesign(size, cssWeight, false), cssWeight);
+        else
+        {
+            NSString* family = [lower isEqualToString:@"serif"]        ? @"Times"
+                               : [lower isEqualToString:@"sans-serif"] ? @"Helvetica"
+                               : [lower isEqualToString:@"monospace"]  ? @"Courier"
+                               : [lower isEqualToString:@"cursive"]    ? @"Apple Chancery"
+                               : [lower isEqualToString:@"fantasy"]    ? @"Papyrus"
+                                                                        : name;
+            font = FamilyFont(family, size, cssWeight, italic);
+        }
+        if(font)
+            break;
+    }
+    if(!font)
+        font = WithCSSWeight(SystemFont(size, cssWeight), cssWeight);
+
+    if(italic && font && !(CTFontGetSymbolicTraits(font) & kCTFontTraitItalic))
+    {
+        CTFontDescriptorRef base = CTFontCopyFontDescriptor(font);
+        CTFontDescriptorRef d    = CTFontDescriptorCreateCopyWithSymbolicTraits(base, kCTFontTraitItalic, kCTFontTraitItalic);
+        CTFontRef           it   = d ? CTFontCreateWithFontDescriptor(d, size, nullptr) : nullptr;
+        if(d)
+            CFRelease(d);
+        if(it && (CTFontGetSymbolicTraits(it) & kCTFontTraitItalic))
+        {
+            // The italic keeps the upright's weight variation on macOS and on iOS 27. Below 27 the
+            // system font's italic at text sizes (.SFUI-RegularItalic, under 20 pt on iOS 26.5) loses
+            // it, so bold italic drew at regular weight: set it again.
+            NSNumber* weight  = ((NSDictionary*)CFBridgingRelease(CTFontCopyVariation(font)))[@(0x77676874)];
+            NSNumber* carried = ((NSDictionary*)CFBridgingRelease(CTFontCopyVariation(it)))[@(0x77676874)];
+            CFRelease(font);
+            font = it;
+            if(weight && ![carried isEqual:weight])
+                font = WithCSSWeight(font, (int)std::lround(weight.doubleValue));
+        }
+        else
+        {
+            if(it)
+                CFRelease(it);
+            // macOS's skew {size, 0, size * 0.2, size}: NSFont's text transform carries the size, CoreText's matrix does not.
+            const CGAffineTransform skew   = CGAffineTransformMake(1, 0, 0.2, 1, 0, 0);
+            CTFontRef               skewed = CTFontCreateWithFontDescriptor(base, size, &skew);
+            if(skewed)
+            {
+                CFRelease(font);
+                font = skewed;
+            }
+        }
+        CFRelease(base);
+    }
+    return font;
+}
+#endif
 
 NSFont* LHResolveFont(NSString* families, CGFloat size, int weight, bool italic)
 {
@@ -1488,7 +1882,7 @@ LHContainer::~LHContainer()
     }
 }
 
-static CTFontRef CreateFeatureFont(NSFont* base, const std::string& features)
+static CTFontRef CreateFeatureFont(CTFontRef base, const std::string& features)
 {
     NSMutableArray* settings = [NSMutableArray array];
     for(size_t start = 0; start < features.size();)
@@ -1505,9 +1899,9 @@ static CTFontRef CreateFeatureFont(NSFont* base, const std::string& features)
     }
     CTFontDescriptorRef descriptor = CTFontDescriptorCreateWithAttributes(
         (__bridge CFDictionaryRef) @{(__bridge NSString*)kCTFontFeatureSettingsAttribute: settings});
-    CTFontRef font = CTFontCreateCopyWithAttributes((__bridge CTFontRef)base, 0, nullptr, descriptor);
+    CTFontRef font = CTFontCreateCopyWithAttributes(base, 0, nullptr, descriptor);
     CFRelease(descriptor);
-    return font ? font : (CTFontRef)CFBridgingRetain(base);
+    return font ? font : (CTFontRef)CFRetain(base);
 }
 
 static std::shared_ptr<SharedFont> AcquireSharedFont(const lh::font_description& descr, CGFloat size)
@@ -1529,10 +1923,24 @@ static std::shared_ptr<SharedFont> AcquireSharedFont(const lh::font_description&
             return it->second;
     }
 
+#if TARGET_OS_OSX
     NSFont* nsfont = ResolveFont(descr.family, size, descr.weight, italic);
+#else
+    CTFontRef resolved = ResolveFont(descr.family, size, descr.weight, italic); // +1, held by sf as the NSFont is
+#endif
 
     auto sf            = std::make_shared<SharedFont>();
-    sf->font           = descr.features.empty() ? (CTFontRef)CFBridgingRetain(nsfont) : CreateFeatureFont(nsfont, descr.features);
+#if TARGET_OS_OSX
+    sf->font           = descr.features.empty() ? (CTFontRef)CFBridgingRetain(nsfont) : CreateFeatureFont((__bridge CTFontRef)nsfont, descr.features);
+#else
+    sf->font           = resolved;
+    if(!descr.features.empty())
+    {
+        CTFontRef featured = CreateFeatureFont(resolved, descr.features);
+        CFRelease(resolved);
+        sf->font = featured;
+    }
+#endif
     sf->kern           = descr.letter_spacing;
     CFNumberRef kern   = CFNumberCreate(nullptr, kCFNumberCGFloatType, &sf->kern);
     const void* keys[] = {kCTFontAttributeName, kCTKernAttributeName};
@@ -1906,6 +2314,57 @@ lh::pixel_t LHContainer::text_width(const char* text, lh::uint_ptr hFont)
     }
     sf.widths.emplace(text, w);
     return static_cast<float>(w);
+}
+
+// Telegram (VENDOR.md edit 52): draw_text's two paths, read back. Simple text (printable ASCII, one glyph per byte)
+// is drawn at the shaper's xs; any other through the cached CTLine, whose caret offsets CoreText enumerates in one pass
+// (a query per index costs the line's length each, so a long run was quadratic: final review C1). A boundary's offset
+// is its character's leading edge, the end's the last character's trailing edge, a boundary inside a surrogate pair
+// takes the pair's start, and one CoreText reports nothing for takes the boundary before it.
+std::vector<float> LHContainer::caret_offsets(const char* text, lh::uint_ptr hFont)
+{
+    auto* f = reinterpret_cast<Font*>(hFont);
+    if(!f || !f->shared || !text)
+        return {};
+    if(!*text)
+        return {0.0f};
+    SimpleRun simple;
+    if(ShapeSimple(*f->shared, text, simple))
+    {
+        std::vector<float> offsets(simple.count + 1);
+        for(size_t i = 0; i < simple.count; i++)
+            offsets[i] = static_cast<float>(simple.xs[i]);
+        offsets[simple.count] = static_cast<float>(simple.width);
+        return offsets;
+    }
+    CTLineRef line = CopyLine(*f->shared, text);
+    if(!line)
+        return {};
+    CFStringRef str = CFStringCreateWithCString(nullptr, text, kCFStringEncodingUTF8);
+    std::vector<float> offsets;
+    if(str)
+    {
+        const CFIndex units = CFStringGetLength(str);
+        offsets.assign(static_cast<size_t>(units) + 1, NAN);
+        float* const out = offsets.data();
+        CTLineEnumerateCaretOffsets(line, ^(double offset, CFIndex index, bool leadingEdge, bool*) {
+            if(index < 0 || index >= units)
+                return;
+            if(leadingEdge)
+                out[index] = static_cast<float>(offset);
+            else if(std::isnan(out[index + 1]))
+                out[index + 1] = static_cast<float>(offset);
+        });
+        for(CFIndex i = 0; i <= units; i++)
+        {
+            const bool inside = i > 0 && i < units && CFStringIsSurrogateLowCharacter(CFStringGetCharacterAtIndex(str, i));
+            if(inside || std::isnan(offsets[size_t(i)]))
+                offsets[size_t(i)] = i > 0 ? offsets[size_t(i - 1)] : 0.0f;
+        }
+        CFRelease(str);
+    }
+    CFRelease(line);
+    return offsets;
 }
 
 static void DrawDecoration(CGContextRef ctx, CGFloat x, CGFloat y, CGFloat w, CGFloat t, int style)
@@ -3404,7 +3863,12 @@ void LHContainer::draw_conic_gradient(lh::uint_ptr hdc, const lh::background_lay
             CGContextSaveGState(cg);
             CGContextClipToRect(cg, tile);
             CGContextTranslateCTM(cg, tile.origin.x - origin.origin.x, tile.origin.y - origin.origin.y);
+#if TARGET_OS_OSX
             if(@available(macOS 14.0, *))
+#else
+            // iOS: CGContextDrawConicGradient is iOS 17; `macOS 14.0, *` is true on every iOS.
+            if(@available(iOS 17.0, *))
+#endif
             {
                 CGGradientRef g = CreateGradient(gradient.color_points);
                 if(g)
@@ -3423,14 +3887,38 @@ void LHContainer::draw_conic_gradient(lh::uint_ptr hdc, const lh::background_lay
     CGContextRestoreGState(ctx);
 }
 
+#if !TARGET_OS_OSX
+bool LHContainer::refuse_request(const std::string& url)
+{
+    // The image URLs LookupImage resolves itself (as it classifies them); anything else would go to
+    // LoadProvided, which has nothing on iOS and so returns {}.
+    if(url.empty() || url.rfind("data:", 0) == 0 || HasScheme(url, "icon:") || url.rfind("sf:", 0) == 0)
+        return false;
+    m_refused_requests.fetch_add(1, std::memory_order_relaxed);
+    return true;
+}
+#endif
+
 void LHContainer::load_image(const char* src, const char* baseurl, bool redraw_on_ready)
 {
+#if !TARGET_OS_OSX
+    if(src && refuse_request(src))
+        return;
+#endif
     if(src)
         LookupImage(src);
 }
 
 void LHContainer::get_image_size(const char* src, const char* baseurl, lh::size& sz)
 {
+#if !TARGET_OS_OSX
+    if(src && refuse_request(src))
+    {
+        sz.width  = 0.0f;
+        sz.height = 0.0f;
+        return;
+    }
+#endif
     ImageHandle img = src ? LookupImage(src) : ImageHandle();
     sz.width        = img ? static_cast<float>(img.size.width) : 0.0f;
     sz.height       = img ? static_cast<float>(img.size.height) : 0.0f;
@@ -3446,6 +3934,11 @@ void LHContainer::draw_image(lh::uint_ptr hdc, const lh::background_layer& layer
 {
     if(lh::g_paint_trace)
         return;
+#if !TARGET_OS_OSX
+    // Counted where the URL arrives, before the painter is handed it. The rest is unchanged: a refused URL
+    // looks up to nothing below, as it did.
+    refuse_request(url);
+#endif
     flush_text();
     if(m_shapes)
     {
@@ -3498,6 +3991,11 @@ void LHContainer::draw_list_marker(lh::uint_ptr hdc, const lh::list_marker& mark
 {
     if(lh::g_paint_trace)
         return;
+#if !TARGET_OS_OSX
+    // As in draw_image: counted on arrival; a refused image marker still looks up to nothing below.
+    if(!marker.image.empty())
+        refuse_request(marker.image);
+#endif
     flush_text();
     if(m_shapes)
     {
@@ -3723,7 +4221,7 @@ void LHContainer::draw_borders(lh::uint_ptr hdc, const lh::borders& borders, con
             {
                 const lh::border* b;
                 CGFloat           w;
-                CGPoint           poly[4];
+                CGPoint           poly[5];
                 CGPoint           a, z;
                 bool              topLeft;
             } list[4] = {
@@ -3757,7 +4255,7 @@ void LHContainer::draw_borders(lh::uint_ptr hdc, const lh::borders& borders, con
                     continue;
                 CGContextSaveGState(ctx);
                 CGContextBeginPath(ctx);
-                CGContextAddLines(ctx, s.poly, 4);
+                CGContextAddLines(ctx, s.poly, 5);
                 CGContextClosePath(ctx);
                 if(s.b->style == lh::border_style_dotted || s.b->style == lh::border_style_dashed)
                 {
@@ -3803,6 +4301,11 @@ void LHContainer::draw_borders(lh::uint_ptr hdc, const lh::borders& borders, con
                         CGContextAddLineToPoint(ctx, z.x, z.y);
                     }
                     CGContextStrokePath(ctx);
+#else
+                    // Telegram (VENDOR.md edit 36): Blink's metrics, fitted to the side from corner to corner.
+                    SetStroke(ctx, c);
+                    StrokeStyledSegment(ctx, s.a, s.z, s.w, s.b->style == lh::border_style_dotted);
+#endif
                 }
                 else
                 {
@@ -3948,7 +4451,42 @@ void LHContainer::draw_box_shadow(lh::uint_ptr hdc, const lh::position& box, con
     auto ctx = reinterpret_cast<CGContextRef>(hdc);
     if(!ctx || r.size.width <= 0 || r.size.height <= 0)
         return;
-    if(!m_capture)
+    // Telegram (VENDOR.md edit 65): a blur past 24 device pixels never needs full resolution (Skia's GPU blur scales its
+    // source down until sigma is at most 4). Its raster is laid out on the shadow's own ink, so its key holds no
+    // sub-pixel phase, and is drawn through the CTM, rotated or skewed too: a moving or turning shadow keeps one cache
+    // entry. LH_EXACT_SHADOWS draws it at full resolution, as before, for the parity tests.
+    if(!m_capture && blur * DeviceScale(ctx) > 24 && !getenv("LH_EXACT_SHADOWS"))
+    {
+        std::string key = "shadowdown:";
+        for(CGFloat v : {r.size.width, r.size.height, dx, dy, blur, spread})
+            AppendNumber(key, v);
+        for(auto v : {radius.top_left_x, radius.top_left_y, radius.top_right_x, radius.top_right_y, radius.bottom_right_x, radius.bottom_right_y, radius.bottom_left_x, radius.bottom_left_y})
+            AppendNumber(key, F(v));
+        AppendInteger(key, (shadow.color.red << 24) | (shadow.color.green << 16) | (shadow.color.blue << 8) | shadow.color.alpha);
+        AppendInteger(key, shadow.inset);
+        // Three of the raster's pixels (blur / 24 each) past the ink, so that an inset shadow's raster has its own pixels
+        // on both sides of the box's edge.
+        CGRect area = CGRectInset(ink, -blur / 8, -blur / 8);
+        CGContextSaveGState(ctx);
+        apply_clips(ctx, ink);
+        CGMutablePathRef clip = CGPathCreateMutable();
+        if(!shadow.inset)
+            CGPathAddRect(clip, nullptr, CGRectInset(area, -1, -1));
+        AddRoundedRect(clip, r, radius);
+        CGContextAddPath(ctx, clip);
+        if(shadow.inset)
+            TWClipPath(ctx, false);
+        else
+            TWClipPath(ctx, true);
+        CGPathRelease(clip);
+        // The raster is not clipped to the box: the box's edge is the clip above, at full resolution, and the raster has
+        // shadow on both sides of it, so scaling it up darkens no ring along the box.
+        bool drawn = DrawDownsampled(ctx, area, key, blur, [&](CGContextRef bitmap) { paint_box_shadow(bitmap, r, radius, shadow, false); });
+        CGContextRestoreGState(ctx);
+        if(drawn)
+            return;
+    }
+    else if(!m_capture)
     {
         CGRect device = CGRectIntegral(CGContextConvertRectToDeviceSpace(ctx, ink));
         CGRect aligned = CGContextConvertRectToUserSpace(ctx, device);
@@ -4021,7 +4559,7 @@ void LHContainer::draw_box_shadow(lh::uint_ptr hdc, const lh::position& box, con
     CGContextRestoreGState(ctx);
 }
 
-void LHContainer::paint_box_shadow(CGContextRef ctx, CGRect r, const lh::border_radiuses& radius, const lh::shadow_paint& shadow)
+void LHContainer::paint_box_shadow(CGContextRef ctx, CGRect r, const lh::border_radiuses& radius, const lh::shadow_paint& shadow, bool clip)
 {
     CGFloat dx = F(shadow.x), dy = F(shadow.y), blur = F(shadow.blur), spread = F(shadow.spread);
     CGFloat reach = blur + std::fabs(spread) + std::max(std::fabs(dx), std::fabs(dy)) + 2;
@@ -4042,25 +4580,32 @@ void LHContainer::paint_box_shadow(CGContextRef ctx, CGRect r, const lh::border_
     CGContextSaveGState(ctx);
     CGFloat far = CGRectGetWidth(ink) + reach * 4 + 1000;
     CGMutablePathRef path = CGPathCreateMutable();
+    // Telegram (VENDOR.md edit 65): without `clip` (a downsampled raster), the caller clips to the box.
     if(shadow.inset)
     {
-        CGMutablePathRef clip = CGPathCreateMutable();
-        AddRoundedRect(clip, r, radius);
-        CGContextAddPath(ctx, clip);
-        TWClipPath(ctx, false);
-        CGPathRelease(clip);
+        if(clip)
+        {
+            CGMutablePathRef box = CGPathCreateMutable();
+            AddRoundedRect(box, r, radius);
+            CGContextAddPath(ctx, box);
+            TWClipPath(ctx, false);
+            CGPathRelease(box);
+        }
         CGRect frame = CGRectInset(r, -reach * 2, -reach * 2);
         CGPathAddRect(path, nullptr, CGRectOffset(frame, far, 0));
         if(shape.size.width > 0 && shape.size.height > 0)
             AddRoundedRect(path, CGRectOffset(shape, far, 0), shape_radius);
     } else
     {
-        CGMutablePathRef clip = CGPathCreateMutable();
-        CGPathAddRect(clip, nullptr, CGRectInset(ink, -1, -1));
-        AddRoundedRect(clip, r, radius);
-        CGContextAddPath(ctx, clip);
-        TWClipPath(ctx, true);
-        CGPathRelease(clip);
+        if(clip)
+        {
+            CGMutablePathRef outside = CGPathCreateMutable();
+            CGPathAddRect(outside, nullptr, CGRectInset(ink, -1, -1));
+            AddRoundedRect(outside, r, radius);
+            CGContextAddPath(ctx, outside);
+            TWClipPath(ctx, true);
+            CGPathRelease(outside);
+        }
         AddRoundedRect(path, CGRectOffset(shape, far, 0), shape_radius);
     }
     CGAffineTransform ctm    = shadow_transform(ctx);
@@ -4078,6 +4623,7 @@ void LHContainer::paint_box_shadow(CGContextRef ctx, CGRect r, const lh::border_
     CGPathRelease(path);
     CGContextRestoreGState(ctx);
 }
+
 
 static CGPathRef CreateVectorPath(const lh::vector_path& path)
 {
@@ -4540,6 +5086,27 @@ static CGColorSpaceRef FilterSpace(CGContextRef ctx)
     return space;
 }
 
+// Telegram (VENDOR.md edit 64): an effect store's key, everything a filter's or a backdrop's image is made from: the
+// effect (its owner in the painted tree, its steps), the colour space, and the target's rect (`offset` into document
+// space; rounded to a millionth of a pixel, so that float noise between tiles misses), scales and orientation.
+static std::string EffectKey(char kind, const void* owner, const lh::filter_vector& steps, CGColorSpaceRef space, const FilterTarget& t,
+                             CGPoint offset)
+{
+    std::string key(1, kind);
+    AppendInteger(key, reinterpret_cast<intptr_t>(owner));
+    AppendInteger(key, static_cast<int64_t>(FilterHash(steps, 0x64)));
+    AppendInteger(key, reinterpret_cast<intptr_t>(space));
+    AppendInteger(key, t.flipped);
+    AppendInteger(key, t.reduced);
+    AppendInteger(key, static_cast<int64_t>(t.pw));
+    AppendInteger(key, static_cast<int64_t>(t.ph));
+    for(CGFloat v : {t.user.origin.x + offset.x, t.user.origin.y + offset.y, t.user.size.width, t.user.size.height})
+        AppendInteger(key, std::llround(v * 1e6));
+    for(CGFloat v : {t.sx, t.sy})
+        AppendInteger(key, std::llround(v * 1e9));
+    return key;
+}
+
 void LHContainer::draw_filtered(lh::uint_ptr hdc, const lh::filter_paint& filter, const std::function<void(lh::uint_ptr)>& paint)
 {
     if(lh::g_paint_trace)
@@ -4574,6 +5141,10 @@ void LHContainer::draw_filtered(lh::uint_ptr hdc, const lh::filter_paint& filter
         paint(hdc);
         return;
     }
+    // Telegram (VENDOR.md edit 64): the result draws inside its target only, so a paint whose clip (a tile) the target
+    // misses makes none.
+    if(!CGRectIntersectsRect(target.user, CGContextGetClipBoundingBox(ctx)))
+        return;
     ReduceForBlur(target, *filter.steps);
     CGColorSpaceRef space  = FilterSpace(ctx);
     if(m_backdrop_source_depth > 0 && m_source_filter_scope && s_source_filter_cache.load(std::memory_order_relaxed))
@@ -4635,8 +5206,29 @@ void LHContainer::draw_filtered(lh::uint_ptr hdc, const lh::filter_paint& filter
             return;
         }
     }
-    CGContextRef    bitmap = CreateFilterBitmap(target, space);
-    if(!bitmap)
+    // Telegram (VENDOR.md edit 64): made once per key when a host's paints share a store. A bitmap that cannot be made
+    // paints the content unfiltered where there is no store; with one, every paint draws nothing for it alike.
+    bool unfiltered = false;
+    auto make       = [&]() -> CGImageRef {
+        CGContextRef bitmap = CreateFilterBitmap(target, space);
+        if(!bitmap)
+        {
+            unfiltered = true;
+            return nullptr;
+        }
+        auto saved = m_clips;
+        m_clips.clear();
+        paint(reinterpret_cast<lh::uint_ptr>(bitmap));
+        m_clips = saved;
+        CGImageRef source = CGBitmapContextCreateImage(bitmap);
+        CGContextRelease(bitmap);
+        CGImageRef image = LHCreateFilteredImage(source, *filter.steps, std::max(target.sx, target.sy), target.flipped, false, space);
+        CGImageRelease(source);
+        return image;
+    };
+    const bool shared   = effect_store && filter.owner;
+    CGImageRef filtered = shared ? effect_store->image(EffectKey('f', filter.owner, *filter.steps, space, target, CGPointZero), make) : make();
+    if(unfiltered && !shared)
     {
         paint(hdc);
         return;
@@ -4657,6 +5249,12 @@ void LHContainer::draw_filtered(lh::uint_ptr hdc, const lh::filter_paint& filter
         CGContextRestoreGState(ctx);
         CGImageRelease(filtered);
     }
+}
+
+void LHContainer::allow_backdrops(const std::vector<const void*>& owners)
+{
+    for(const void* owner : owners)
+        backdrop_allowed(owner);
 }
 
 bool LHContainer::backdrop_allowed(const void* owner)
@@ -4701,16 +5299,27 @@ void LHContainer::draw_backdrop(lh::uint_ptr hdc, const lh::filter_paint& filter
     FilterTarget target;
     if(!ctx || m_hidden_depth > 0 || !backdrop_source || !FilterTargetFor(ctx, box, target))
         return;
+    // Telegram (VENDOR.md edit 64): a backdrop draws inside its box only, so a paint whose clip (a tile) the box misses
+    // makes none. After backdrop_allowed: every paint allows the same backdrops.
+    if(!CGRectIntersectsRect(target.user, CGContextGetClipBoundingBox(ctx)))
+        return;
     ReduceForBlur(target, *filter.steps);
     const CGAffineTransform placed = group_matrix();
     if(std::fabs(placed.a - 1) > 1e-6 || std::fabs(placed.d - 1) > 1e-6 || std::fabs(placed.b) > 1e-6 || std::fabs(placed.c) > 1e-6)
         return;
-    CGImageRef source = backdrop_source(filter.owner, CGRectOffset(target.user, placed.tx, placed.ty), target.sx, target.sy, target.flipped);
-    if(!source)
-        return;
-    CGColorSpaceRef space    = FilterSpace(ctx);
-    CGImageRef      filtered = LHCreateFilteredImage(source, *filter.steps, std::max(target.sx, target.sy), target.flipped, true, space);
-    CGImageRelease(source);
+    CGColorSpaceRef space = FilterSpace(ctx);
+    // Telegram (VENDOR.md edit 64): made once per key when a host's paints share a store.
+    auto make = [&]() -> CGImageRef {
+        CGImageRef source = backdrop_source(filter.owner, CGRectOffset(target.user, placed.tx, placed.ty), target.sx, target.sy, target.flipped);
+        if(!source)
+            return nullptr;
+        CGImageRef image = LHCreateFilteredImage(source, *filter.steps, std::max(target.sx, target.sy), target.flipped, true, space);
+        CGImageRelease(source);
+        return image;
+    };
+    CGImageRef filtered = effect_store && filter.owner
+                              ? effect_store->image(EffectKey('b', filter.owner, *filter.steps, space, target, CGPointMake(placed.tx, placed.ty)), make)
+                              : make();
     if(!filtered)
         return;
     CGContextSaveGState(ctx);
@@ -4757,6 +5366,7 @@ void LHContainer::get_viewport(lh::position& viewport) const
 void LHContainer::get_media_features(lh::media_features& media) const
 {
     media.dark_color_scheme = m_dark_color_scheme;
+    media.color_scheme      = m_dark_color_scheme ? 1 : 0; // the colour scheme the shared litehtml reads (Telegram, VENDOR.md edit 13)
     media.type          = lh::media_type_screen;
     media.width         = m_viewport.width;
     media.height        = m_viewport.height;
@@ -4772,4 +5382,259 @@ void LHContainer::get_language(std::string& language, std::string& culture) cons
 {
     language = "en";
     culture  = "";
+}
+
+// LHHostSupport.h (M1d plan, Task 5): one LHContainer, driven without an LHDocument by WidgetRuntime's iOS host.
+
+struct LHHostContainer::Impl
+{
+    LHContainer container;
+};
+
+LHHostContainer::LHHostContainer() : m_impl(new Impl())
+{
+    m_impl->container.set_default_font_size(16);
+}
+
+LHHostContainer::~LHHostContainer()
+{
+    delete m_impl;
+}
+
+lh::uint_ptr LHHostContainer::createFont(const lh::font_description& descr, lh::font_metrics* metrics)
+{
+    return m_impl->container.create_font(descr, nullptr, metrics);
+}
+
+void LHHostContainer::deleteFont(lh::uint_ptr font)
+{
+    // delete_font reads no container state: any container deletes any of their handles.
+    static LHContainer* deleter = new LHContainer();
+    deleter->delete_font(font);
+}
+
+CTFontRef LHHostContainer::nativeFont(lh::uint_ptr font)
+{
+    return LHContainer::native_font(font);
+}
+
+double LHHostContainer::textWidth(const char* text, lh::uint_ptr font)
+{
+    return m_impl->container.text_width(text, font).value();
+}
+
+std::vector<float> LHHostContainer::caretOffsets(const char* text, lh::uint_ptr font)
+{
+    return m_impl->container.caret_offsets(text, font);
+}
+
+std::shared_ptr<lh::text_breaker> LHHostContainer::createTextBreaker(const std::string& text, lh::uint_ptr font)
+{
+    return m_impl->container.create_text_breaker(text, font);
+}
+
+void LHHostContainer::transformText(std::string& text, lh::text_transform transform)
+{
+    m_impl->container.transform_text(text, transform);
+}
+
+bool LHHostContainer::pathContains(const lh::vector_path& path, float x, float y)
+{
+    return m_impl->container.point_in_clip_path(path, lh::pixel_t(x), lh::pixel_t(y));
+}
+
+double LHHostContainer::defaultFontSize() const
+{
+    return m_impl->container.get_default_font_size().value();
+}
+
+const char* LHHostContainer::defaultFontName() const
+{
+    return m_impl->container.get_default_font_name();
+}
+
+CGImageRef LHHostContainer::createImage(const void* bytes, size_t length, bool svg, CGSize* size, size_t maxPixelBytes)
+{
+    if(!bytes || length == 0 || length > kMaxDataImageBytes)
+        return nullptr;
+    @autoreleasepool
+    {
+        NSData*     data   = [NSData dataWithBytes:bytes length:length];
+        ImageHandle handle = LoadImageFromData(data, svg, maxPixelBytes);
+        if(!handle)
+            return nullptr;
+        if(size)
+            *size = handle.size;
+        return CGImageRetain(handle.image);
+    }
+}
+
+lh::document_container& LHHostContainer::container()
+{
+    return m_impl->container;
+}
+
+namespace
+{
+// LHDocument's PixelSnap for a host paint (its own is file-local to LHDocument.mm).
+float HostSnapScale(CGContextRef ctx)
+{
+    const CGAffineTransform m = CGContextGetCTM(ctx);
+    const CGFloat           k = std::hypot(m.a, m.b);
+    return k >= 1 && k <= 16 && std::isfinite(k) ? static_cast<float>(k) : 1.0f;
+}
+thread_local std::vector<std::pair<float, bool>> gHostPaintScopes;
+}
+
+void LHHostContainer::beginPaint(CGContextRef ctx)
+{
+    const float saved = lh::pixel_snap_scale();
+    lh::pixel_snap_scale() = HostSnapScale(ctx);
+    const bool sourceFilters = m_impl->container.begin_source_filters();
+    gHostPaintScopes.emplace_back(saved, sourceFilters);
+    m_impl->container.begin_text_batching(ctx);
+}
+
+void LHHostContainer::endPaint()
+{
+    m_impl->container.end_text_batching();
+    if(gHostPaintScopes.empty())
+        return;
+    auto [saved, sourceFilters] = gHostPaintScopes.back();
+    gHostPaintScopes.pop_back();
+    if(sourceFilters)
+        m_impl->container.end_source_filters();
+    lh::pixel_snap_scale() = saved;
+}
+
+// draw_image's own drawing (above), for a decoded image: the same clip, tiling and raster cache, keyed by the image's
+// identity, which the host makes unique for the process (an address is not: the cache outlives the image).
+void LHHostContainer::drawImage(CGContextRef ctx, const lh::background_layer& layer, CGImageRef image, uint64_t identity)
+{
+    LHContainer& c = m_impl->container;
+    c.flush_text();
+    if(!ctx || !image || layer.clip_box.width == 0_px || layer.clip_box.height == 0_px)
+        return;
+    CGContextSaveGState(ctx);
+    c.apply_clips(ctx, R(layer.clip_box));
+    c.clip_background_layer(ctx, layer);
+    CGRect      origin = R(layer.origin_box);
+    std::string key    = "W|";
+    AppendInteger(key, identity);
+    AppendInteger(key, CGImageGetWidth(image));
+    AppendInteger(key, CGImageGetHeight(image));
+    c.for_each_tile(layer, origin.size, [&](CGRect tile) {
+        if(!DrawRasterized(ctx, tile, key, [&](CGContextRef inner) { DrawCGImage(inner, image, tile); }))
+            DrawCGImage(ctx, image, tile);
+    });
+    CGContextRestoreGState(ctx);
+}
+
+// draw_list_marker's image branch (above), for a decoded image.
+void LHHostContainer::drawListMarkerImage(CGContextRef ctx, const lh::list_marker& marker, CGImageRef image)
+{
+    LHContainer& c = m_impl->container;
+    c.flush_text();
+    if(!ctx || !image)
+        return;
+    CGRect r = R(marker.pos);
+    CGContextSaveGState(ctx);
+    c.apply_clips(ctx, r);
+    DrawCGImage(ctx, image, r);
+    CGContextRestoreGState(ctx);
+}
+
+void LHHostContainer::setBackdropSource(std::function<CGImageRef(const void*, CGRect, CGFloat, CGFloat, bool)> source)
+{
+    m_impl->container.backdrop_source = std::move(source);
+}
+
+void LHHostContainer::setEffectStore(LHEffectStore* store)
+{
+    m_impl->container.effect_store = store;
+}
+
+void LHHostContainer::allowBackdrops(const std::vector<const void*>& owners)
+{
+    m_impl->container.allow_backdrops(owners);
+}
+
+// Telegram (VENDOR.md edit 64).
+struct LHEffectStore::Entry
+{
+    std::mutex              lock;
+    std::condition_variable done;
+    bool                    ready = false;
+    CGImageRef              image = nullptr;
+};
+
+LHEffectStore::LHEffectStore() = default;
+
+LHEffectStore::~LHEffectStore()
+{
+    for(auto& entry : m_entries)
+    {
+        if(entry.second->image)
+            CGImageRelease(entry.second->image);
+    }
+}
+
+CGImageRef LHEffectStore::image(const std::string& key, const std::function<CGImageRef()>& make)
+{
+    std::shared_ptr<Entry> entry;
+    bool                   maker = false;
+    {
+        std::lock_guard<std::mutex> guard(m_lock);
+        auto found = m_entries.find(key);
+        if(found != m_entries.end())
+            entry = found->second;
+        else
+        {
+            m_made++;
+            if(m_bytes < kMaxBytes)
+            {
+                entry = std::make_shared<Entry>();
+                m_entries.emplace(key, entry);
+                maker = true;
+            }
+        }
+    }
+    if(!entry)
+        return make();
+    if(maker)
+    {
+        // Ready on every way out, a throw included: a paint waiting for this entry must never wait forever.
+        struct Publish
+        {
+            Entry* entry;
+            ~Publish()
+            {
+                {
+                    std::lock_guard<std::mutex> guard(entry->lock);
+                    entry->ready = true;
+                }
+                entry->done.notify_all();
+            }
+        } publish{entry.get()};
+        CGImageRef image = make();
+        {
+            std::lock_guard<std::mutex> guard(entry->lock);
+            entry->image = image;
+        }
+        if(image)
+        {
+            std::lock_guard<std::mutex> guard(m_lock);
+            m_bytes += CGImageGetBytesPerRow(image) * CGImageGetHeight(image);
+        }
+        return image ? CGImageRetain(image) : nullptr;
+    }
+    std::unique_lock<std::mutex> wait(entry->lock);
+    entry->done.wait(wait, [&] { return entry->ready; });
+    return entry->image ? CGImageRetain(entry->image) : nullptr;
+}
+
+size_t LHEffectStore::made() const
+{
+    std::lock_guard<std::mutex> guard(m_lock);
+    return m_made;
 }

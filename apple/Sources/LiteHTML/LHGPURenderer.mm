@@ -247,12 +247,16 @@ const int kAtlasSize = 2048;
         if(!_device)
             return nil;
         _queue   = [_device newCommandQueue];
+#if TARGET_OS_OSX
         _storage = MTLStorageModeManaged;
         if(@available(macOS 10.15, *))
         {
             if(_device.hasUnifiedMemory)
                 _storage = MTLStorageModeShared;
         }
+#else
+        _storage = MTLStorageModeShared; // iOS: there is no managed storage mode
+#endif
         NSArray *pipelines;
         @synchronized(LHGPURenderer.class)
         {
@@ -444,7 +448,11 @@ const int kAtlasSize = 2048;
     if(@available(macOS 10.13, *))
         align = MAX(align, [_device minimumLinearTextureAlignmentForPixelFormat:MTLPixelFormatBGRA8Unorm]);
     const size_t bytesPerRow = (kPageSize * 4 + align - 1) / align * align;
+#if TARGET_OS_OSX
     id<MTLBuffer> buffer     = [_device newBufferWithLength:bytesPerRow * kPageSize options:_storage == MTLStorageModeShared ? MTLResourceStorageModeShared : MTLResourceStorageModeManaged];
+#else
+    id<MTLBuffer> buffer     = [_device newBufferWithLength:bytesPerRow * kPageSize options:MTLResourceStorageModeShared];
+#endif
     if(!buffer)
         return NO;
     MTLTextureDescriptor *desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:kPageSize height:kPageSize mipmapped:NO];
@@ -505,12 +513,14 @@ const int kAtlasSize = 2048;
     auto existing = _textures.find(key);
     if(existing != _textures.end() && existing->second.page >= 0)
     {
+#if TARGET_OS_OSX
         if(_storage == MTLStorageModeManaged)
         {
             const Page &p = _pages[existing->second.page];
             NSRange     r = NSMakeRange(size_t(existing->second.y) * p.bytesPerRow, size_t(device.size.height) * p.bytesPerRow);
             [p.buffer didModifyRange:r];
         }
+#endif
         return;
     }
     const size_t w = CGBitmapContextGetWidth(ctx), h = CGBitmapContextGetHeight(ctx);
@@ -543,7 +553,11 @@ const int kAtlasSize = 2048;
     int                        quadPage = -1;
     for(NSUInteger t = 0; t < tiles.count; t++)
     {
+#if TARGET_OS_OSX
         CGRect         tile   = tiles[t].rectValue;
+#else
+        CGRect         tile   = LHRectValue(tiles[t]);
+#endif
         id<MTLTexture> target = targets[t];
         const CGFloat  ox = std::round(tile.origin.x * scale), oy = std::round(tile.origin.y * scale);
         const CGRect   area = CGRectMake(ox, oy, target.width, target.height);
