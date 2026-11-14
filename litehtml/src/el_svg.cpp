@@ -1123,9 +1123,9 @@ namespace litehtml
                     href = use->get_attr("xlink:href");
                 if(!href || href[0] != '#' || !href[1] || depth > 8 || m_use_elements <= 0)
                     return;
-                element::ptr target;
-                if(auto root = use->get_document()->root())
-                    target = root->select_one(std::string("#") + (href + 1));
+                // Telegram (VENDOR.md edit 38): looked up in the document's id map, not by a selector built from the
+                // href (a selector parse per instance, and an id that is not an identifier would not parse).
+                const element::ptr target = use->get_document()->svg_element_by_id(href + 1);
                 if(!target)
                     return;
                 for(element::ptr p = use; p; p = p->parent())
@@ -1759,6 +1759,33 @@ namespace litehtml
         if(doc)
             doc->note_svg();
         m_css.set_display(display_inline_block);
+    }
+
+    // Telegram (VENDOR.md edit 38): the document's ids for <use>, the first element with an id winning, gathered again
+    // when the match epoch (every attribute and structure patch moves it) or the paint generation has moved.
+    element::ptr document::svg_element_by_id(const std::string& id) const
+    {
+        if(m_svg_ids_epoch != m_match_epoch || m_svg_ids_generation != m_paint_generation)
+        {
+            m_svg_ids.clear();
+            m_svg_ids_epoch      = m_match_epoch;
+            m_svg_ids_generation = m_paint_generation;
+            if(m_root)
+            {
+                std::vector<element::ptr> pending{m_root};
+                while(!pending.empty())
+                {
+                    element::ptr node = pending.back();
+                    pending.pop_back();
+                    if(const char* value = node->get_attr("id"); value && *value)
+                        m_svg_ids.emplace(value, node);
+                    for(auto it = node->children().rbegin(); it != node->children().rend(); ++it)
+                        pending.push_back(*it);
+                }
+            }
+        }
+        auto it = m_svg_ids.find(id);
+        return it == m_svg_ids.end() ? nullptr : it->second.lock();
     }
 
     // Telegram (VENDOR.md edit 38): the document's instance budget is shared by every <svg>. This svg may draw what its
