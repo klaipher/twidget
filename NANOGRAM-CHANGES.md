@@ -9,7 +9,10 @@ Ours: branch `nanogram`, used by Nanogram for iOS, macOS and Android. History: [
   heights against an indefinite container, exact curve extrema for `transform-box: fill-box`. Tests: V030LayoutTests,
   CanvasSizingTests, WidgetSafeAreaTests, WidgetPaintPolicyTests, and the opt-in stress-kit runner.
 - Where: `apple/Sources/TwidgetRenderer/`, `apple/Sources/LiteHTML/`, `litehtml/`, `core/src/renderer.cpp`, `apple/Tests/`.
-- Upstream: no. The macOS grid, aspect-ratio and canvas-size fixes are not carried: the Android line already has its own.
+- Upstream: no. The macOS grid and aspect-ratio fixes are not carried: the Android line already has its own. The canvas-size fix is carried in
+  `litehtml/src/el_image.cpp`, written to work with Android's `core/src/renderer.cpp` fix (db9afca) too: a canvas with a
+  width or height attribute uses them (default 300x150) and does not map them to CSS; one with neither attribute but a
+  `tw-canvas:` source asks the container for the drawn size.
 
 ### gumbo limits (from the iOS app's fork)
 - What: the bundled gumbo parses in linear time and bounded memory: limits for tree depth, attributes, nodes,

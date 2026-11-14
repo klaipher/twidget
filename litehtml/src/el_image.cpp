@@ -1,4 +1,5 @@
 #include "html.h"
+#include "html_microsyntaxes.h"
 #include "el_image.h"
 #include "render_image.h"
 #include "document_container.h"
@@ -13,6 +14,28 @@ litehtml::el_image::el_image(const document::ptr& doc) :
 
 void litehtml::el_image::get_content_size(size& sz, pixel_t /*max_width*/)
 {
+    if(tag() == _canvas_)
+    {
+        // A canvas takes its intrinsic size from its width and height attributes (default 300x150). The
+        // Swift renderer keeps them. The core renderer strips them and gives a tw-canvas: source that
+        // carries the drawn size, so a canvas with neither attribute but a source asks the container.
+        const char* w = get_attr("width");
+        const char* h = get_attr("height");
+        if(!w && !h && !m_src.empty())
+        {
+            get_document()->container()->get_image_size(m_src.c_str(), nullptr, sz);
+            return;
+        }
+        int width  = 300;
+        int height = 150;
+        if(w)
+            html_parse_non_negative_integer(w, width);
+        if(h)
+            html_parse_non_negative_integer(h, height);
+        sz.width  = pixel_t(width);
+        sz.height = pixel_t(height);
+        return;
+    }
     get_document()->container()->get_image_size(m_src.c_str(), nullptr, sz);
 }
 
@@ -31,6 +54,13 @@ void litehtml::el_image::parse_attributes()
 {
     m_src    = get_attr("src", "");
     m_loaded = false;
+
+    // A canvas's width and height are its bitmap size, not presentation hints: they must not become a
+    // fixed CSS size, or a responsive canvas (width:100%) would keep its bitmap height.
+    if(tag() == _canvas_)
+    {
+        return;
+    }
 
     // https://html.spec.whatwg.org/multipage/rendering.html#attributes-for-embedded-content-and-images:the-img-element-5
     const char* str = get_attr("width");
