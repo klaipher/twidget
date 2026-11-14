@@ -1,9 +1,10 @@
-#import <Cocoa/Cocoa.h>
 #include <TargetConditionals.h>
 #if TARGET_OS_OSX
+#import <Cocoa/Cocoa.h>
 #else
 #import <Foundation/Foundation.h>
 #import <CoreGraphics/CoreGraphics.h>
+#import <CoreText/CoreText.h>
 #endif
 #import "LHTextFragment.h"
 
@@ -88,7 +89,11 @@ typedef struct LHKeyedRect {
 /// Whether this document was made by patching the previous one.
 /// Fonts resolved and cached for every document in the process; fonts no document uses are dropped past a bound.
 + (NSUInteger)cachedFontCount;
+#if TARGET_OS_OSX
 + (NSFont *)fontForFamilies:(NSString *)families size:(CGFloat)size weight:(NSInteger)weight italic:(BOOL)italic NS_SWIFT_NAME(font(families:size:weight:italic:));
+#else
++ (CTFontRef)fontForFamilies:(NSString *)families size:(CGFloat)size weight:(NSInteger)weight italic:(BOOL)italic CF_RETURNS_RETAINED NS_SWIFT_NAME(font(families:size:weight:italic:));
+#endif
 + (NSUInteger)rasterCacheBytes;
 + (void)purgeCaches;
 @property (class, nonatomic) BOOL simpleTextEnabled;

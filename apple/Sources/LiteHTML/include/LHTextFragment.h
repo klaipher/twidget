@@ -1,6 +1,6 @@
-#import <Cocoa/Cocoa.h>
 #include <TargetConditionals.h>
 #if TARGET_OS_OSX
+#import <Cocoa/Cocoa.h>
 #else
 #import <Foundation/Foundation.h>
 #import <CoreGraphics/CoreGraphics.h>

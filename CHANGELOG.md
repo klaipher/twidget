@@ -4,6 +4,7 @@ Branch `nanogram`. Base: Telegram's 4769d72. Newest first.
 
 ## Unreleased
 
+- Apple layer and litehtml: the merge of the iOS app's edits now compiles for iOS and macOS (syntax-checked per file): imports and guards of Cocoa, the iOS and macOS dash metrics for dashed borders, iOS spellings of the font and rect API, and the splices the merge left in `document.cpp`.
 - litehtml: UAX #9 bidi through the host (`document_container::bidi_levels`, rule L2) when the host answers; the simplified first-strong-character reordering remains the fallback.
 - litehtml: the calc() registry holds 16,384 distinct expressions per process (was 4,096).
 - litehtml and the Apple layer: the Nanogram iOS app's edits (VENDOR.md edits 1 to 91 there) are carried, so one litehtml serves the iOS, macOS and Android apps: an external-DOM builder and the master CSS in C++, patches in place (text, attributes, structure, pseudo-classes, counters, environment, sheets, document element), a style-byte budget, caps on nesting, lists, text pieces and pseudo-element content, a `<use>` instance budget, `:lang()` and `:empty` per Blink, getComputedStyle lookups, host profile hooks, iOS image policy and no-network counters. Features this branch already had (the macOS and Android versions of fill-box, calc, CSS-wide keywords, object-fit, text-overflow, direction and bidi, colour-stop fix-up, dash metrics, grid-template and others) stay as they were. See NANOGRAM-CHANGES.md for what is and is not carried.

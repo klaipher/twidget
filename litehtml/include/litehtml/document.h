@@ -280,6 +280,8 @@ namespace litehtml
         bool                                    m_finalized = false;
         std::map<std::string, css_properties>   m_share_cache;
         int                                     m_next_share_id = 0;
+        GumboOutput*                            m_gumbo = nullptr;
+        bool                                    m_track_nodes = false;
         // Telegram: set when a style resolved a vw/vh/vmin/vmax length (see viewport_changed).
         mutable bool                            m_viewport_units = false;
         int                                     m_build_depth    = 0;
@@ -485,6 +487,7 @@ namespace litehtml
         int                                     m_table_cells      = 0;
         bool                                    m_table_limited    = false;
         bool                                    m_table_quiet      = false; // Telegram (VENDOR.md edit 84)
+        std::unordered_map<const void*, std::vector<std::shared_ptr<element>>> m_node_elements;
         std::string                             m_master_styles;
         mutable uint32_t                        m_paint_generation = 1;
         uint64_t                                m_match_epoch      = 1;

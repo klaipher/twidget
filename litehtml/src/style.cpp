@@ -2956,7 +2956,6 @@ namespace litehtml
                 if(chain.count(name))
                     return false;
                 css_token_vector value;
-                css_token_vector value;
                 if(const css_token_vector* found = el->find_custom_property(name))
                 {
                     // Telegram (VENDOR.md edit 21): the splice is charged to the style-byte budget before the value is copied.

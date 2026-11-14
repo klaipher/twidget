@@ -59,6 +59,11 @@ namespace litehtml
 
     document::~document()
     {
+        if(m_gumbo)
+        {
+            gumbo_destroy_output(&kGumboDefaultOptions, m_gumbo);
+            m_gumbo = nullptr;
+        }
         // Telegram (VENDOR.md edit 18): the selector-step session points into this document.
         if(m_step_session_open)
             set_selector_step_session(nullptr);
@@ -404,6 +409,13 @@ namespace litehtml
             return false;
         }
 
+        bool restylable_in_place(const element& el)
+        {
+            const std::type_info& type = typeid(el);
+            return type == typeid(html_tag) || type == typeid(el_div) || type == typeid(el_para) || type == typeid(el_td) ||
+                   type == typeid(el_tr) || type == typeid(el_body);
+        }
+
         void scan_selector(const css_selector& selector, bool& attributes, bool& positions)
         {
             for(const css_selector* sel = &selector; sel; sel = sel->m_left.get())
@@ -624,17 +636,6 @@ namespace litehtml
                 changed.push_back(d.first);
         }
         return changed;
-    }
-
-    namespace
-    {
-        static const std::unordered_set<std::string>& box = *new std::unordered_set<std::string>{
-            "border-color", "border-top-color", "border-right-color", "border-bottom-color", "border-left-color", "caret-color", "cursor"};
-        if(name.compare(0, 10, "background") == 0 || box.count(name))
-            return 1;
-        if(name == "color" || name == "text-decoration-color")
-            return 3;
-        return 0;
     }
 
     static bool style_change_is_background_color(const std::string& before, const std::string& after)
@@ -1052,6 +1053,93 @@ namespace litehtml
         for(size_t i = 0; i < m_holes.size(); i++)
             m_node_holes[m_holes[i].node].push_back(i);
         m_template_ok = true;
+    }
+
+    namespace
+    {
+        bool table_part(style_display display)
+        {
+            switch(display)
+            {
+            case display_table_cell:
+            case display_table_row:
+            case display_table_column:
+            case display_table_column_group:
+            case display_table_row_group:
+            case display_table_header_group:
+            case display_table_footer_group:
+            case display_table_caption:
+                return true;
+            default:
+                return false;
+            }
+        }
+
+        bool tree_neutral_change(const std::string& before, const std::string& after, bool inline_box, bool table_cached)
+        {
+            static const std::unordered_set<std::string>& neutral = *new std::unordered_set<std::string>{
+                "width", "height", "min-width", "min-height", "max-width", "max-height", "left", "top", "right", "bottom",
+                "margin", "margin-left", "margin-right", "margin-top", "margin-bottom", "padding", "padding-left",
+                "padding-right", "padding-top", "padding-bottom", "border-radius", "border-top-left-radius",
+                "border-top-right-radius", "border-bottom-left-radius", "border-bottom-right-radius", "border-color",
+                "border-top-color", "border-right-color", "border-bottom-color", "border-left-color", "color", "background",
+                "background-color", "background-image", "background-position", "background-size", "opacity", "transform",
+                "transform-origin", "box-shadow", "text-shadow", "outline-color", "filter", "fill", "stroke", "stroke-width",
+                "stroke-dasharray", "stroke-dashoffset", "fill-opacity", "stroke-opacity", "z-index", "text-align",
+                "vertical-align", "letter-spacing", "flex-grow", "flex-shrink", "flex-basis", "gap", "row-gap", "column-gap",
+                "justify-content", "align-items", "align-self"};
+            auto parse = [](const std::string& text, std::map<std::string, std::string>& out) {
+                if(text.find_first_of("\"'\\{}") != std::string::npos || text.find("/*") != std::string::npos ||
+                   text.find("url(") != std::string::npos)
+                    return false;
+                size_t start = 0;
+                while(start <= text.size())
+                {
+                    size_t end   = text.find(';', start);
+                    std::string part = text.substr(start, end == std::string::npos ? std::string::npos : end - start);
+                    size_t colon = part.find(':');
+                    if(colon != std::string::npos)
+                    {
+                        std::string name = part.substr(0, colon);
+                        name.erase(0, name.find_first_not_of(" \t\n"));
+                        name.erase(name.find_last_not_of(" \t\n") + 1);
+                        for(char& c : name)
+                            c = char(tolower(static_cast<unsigned char>(c)));
+                        out[name] = part.substr(colon + 1);
+                    } else if(part.find_first_not_of(" \t\n") != std::string::npos)
+                        return false;
+                    if(end == std::string::npos)
+                        break;
+                    start = end + 1;
+                }
+                return true;
+            };
+            std::map<std::string, std::string> a, b;
+            if(!parse(before, a) || !parse(after, b))
+                return false;
+            auto allowed = [&](const std::string& name) {
+                if(inline_box && (name.compare(0, 6, "margin") == 0 || name.compare(0, 7, "padding") == 0 || name == "left" ||
+                                  name == "top" || name == "right" || name == "bottom"))
+                    return false;
+                if(table_cached && (name == "width" || name == "height" || name.compare(0, 4, "min-") == 0 ||
+                                    name.compare(0, 4, "max-") == 0 || name.compare(0, 7, "padding") == 0 ||
+                                    name.compare(0, 6, "margin") == 0))
+                    return false;
+                return neutral.count(name) != 0;
+            };
+            for(const auto& kv : a)
+            {
+                auto it = b.find(kv.first);
+                if((it == b.end() || it->second != kv.second) && !allowed(kv.first))
+                    return false;
+            }
+            for(const auto& kv : b)
+            {
+                if(!a.count(kv.first) && !allowed(kv.first))
+                    return false;
+            }
+            return true;
+        }
     }
 
     // 1: patched (or nothing changed), 0: the frame does not fit the template, -1: fits but needs a rebuild.
@@ -1609,14 +1697,6 @@ namespace litehtml
                     for(const auto& child : item->children())
                         observed.push_back(child.get());
                 }
-                const char* content = e.original_tag.data ? e.original_tag.data + e.original_tag.length : nullptr;
-                const bool textarea_newline = e.tag == GUMBO_TAG_TEXTAREA && content && content < base + size &&
-                                              (*content == '\n' || *content == '\r');
-                const bool child_raw = e.tag == GUMBO_TAG_STYLE || e.tag == GUMBO_TAG_SCRIPT || e.tag == GUMBO_TAG_TITLE ||
-                                       textarea_newline || e.tag == GUMBO_TAG_NOSCRIPT;
-                for(unsigned int i = 0; i < e.children.length; i++)
-                    walk(static_cast<const GumboNode*>(e.children.data[i]), child_raw);
-                break;
             }
         }
         if(layout_cache_enabled())
@@ -1635,10 +1715,6 @@ namespace litehtml
             for(const auto& child : item->children())
                 pending.push_back(child.get());
         }
-        m_literals.emplace_back(base + pos, size - pos);
-        for(size_t i = 0; i < m_holes.size(); i++)
-            m_node_holes[m_holes[i].node].push_back(i);
-        m_template_ok = true;
     }
 
     bool document::retext_in_place(const std::vector<element::ptr>& current, const char* text,
@@ -1973,8 +2049,6 @@ namespace litehtml
             if(!m_patch_boxes.emplace(el.get(), outer_box_of(*el)).second)
                 break;
         }
-        out += m_literals.back();
-        return true;
     }
 
     void document::note_replacement(const element::ptr& seed, std::string why)
@@ -2208,7 +2282,6 @@ namespace litehtml
                 for(const auto& child : item->children())
                     pending.push_back(child.get());
             }
-            return false;
         }
         const auto in_gone = [&gone](render_item* item) { return gone.count(item) != 0; };
         m_layout_marked.erase(std::remove_if(m_layout_marked.begin(), m_layout_marked.end(), in_gone), m_layout_marked.end());
@@ -2461,47 +2534,6 @@ namespace litehtml
                     li->mark_layout_dirty();
                 renumbered.push_back(child);
             }
-            plan.parent = parent;
-            plan.node   = b;
-            rebuilds.push_back(std::move(plan));
-            return true;
-        };
-        if(!diff_children(m_gumbo->document, output->document, nullptr, false))
-            return fail();
-
-        auto chain = [](element::ptr el) {
-            std::vector<element::ptr> out;
-            for(; el; el = el->parent())
-                out.push_back(el);
-            return out;
-        };
-        auto nearest_attached = [this](const std::vector<element::ptr>& path) -> element::ptr {
-            for(const auto& candidate : path)
-            {
-                element::ptr el = candidate;
-                while(el && el != m_root)
-                    el = el->parent();
-                if(el == m_root)
-                    return candidate;
-            }
-            return nullptr;
-        };
-        const std::vector<element::ptr> over_chain   = chain(m_over_element);
-        const std::vector<element::ptr> active_chain = chain(m_active_element);
-
-        std::unordered_map<const void*, std::vector<element::ptr>> remapped;
-        remapped.reserve(kept.size() + kept_text.size());
-        for(auto& entry : kept)
-            remapped[entry.first] = {std::move(entry.second)};
-        for(auto& entry : kept_text)
-            remapped[entry.first] = std::move(entry.second);
-        m_node_elements.swap(remapped);
-
-        std::vector<element::ptr> restyle;
-        for(const auto& patch : styles)
-        {
-            patch.first->set_attr("style", patch.second.c_str());
-            restyle.push_back(patch.first);
         }
         m_render_tree_serial++;
         m_layout_before_valid = false;

@@ -1,6 +1,6 @@
-#import <Cocoa/Cocoa.h>
 #include <TargetConditionals.h>
 #if TARGET_OS_OSX
+#import <Cocoa/Cocoa.h>
 #else
 #import <Foundation/Foundation.h>
 #import <CoreGraphics/CoreGraphics.h>
@@ -119,6 +119,7 @@ static void SetStroke(CGContextRef ctx, const lh::web_color& c)
     CGContextSetStrokeColorWithColor(ctx, ContextColor(ctx, c));
 }
 
+#if !TARGET_OS_OSX
 // Telegram (VENDOR.md edit 36): Blink's dash metrics (StyledStrokeData). A dash is 2w long with a gap of w from 3px up,
 // 3w and 2w below; a dot is round and w across with a gap of w. The gap is then fitted (SelectBestDashGap) so an open
 // side starts and ends with a dash and a closed path closes on one. False when fewer than two fit: the line is solid.
@@ -169,6 +170,8 @@ static void StrokeStyledSegment(CGContextRef ctx, CGPoint a, CGPoint z, CGFloat 
     CGContextStrokePath(ctx);
 }
 
+#endif
+
 static void AddRoundedRect(CGMutablePathRef path, CGRect r, const lh::border_radiuses& rad)
 {
     if(r.size.width <= 0 || r.size.height <= 0)
@@ -197,27 +200,6 @@ static void AddRoundedRect(CGMutablePathRef path, CGRect r, const lh::border_rad
     if(tlx > 0 && tly > 0)
         CGPathAddCurveToPoint(path, nullptr, x0, y0 + tly - tly * k, x0 + tlx - tlx * k, y0, x0 + tlx, y0);
     CGPathCloseSubpath(path);
-}
-
-// Telegram (VENDOR.md edit 36): the length of AddRoundedRect's path (each corner a quarter ellipse, by Ramanujan's
-// approximation), for fitting dashes to a closed rounded border.
-static CGFloat RoundedRectLength(CGRect r, const lh::border_radiuses& rad)
-{
-    if(r.size.width <= 0 || r.size.height <= 0)
-        return 0;
-    const CGFloat hw = r.size.width / 2, hh = r.size.height / 2;
-    auto clampx = [&](lh::pixel_t v) { return std::min<CGFloat>(std::max<CGFloat>(F(v), 0), hw); };
-    auto clampy = [&](lh::pixel_t v) { return std::min<CGFloat>(std::max<CGFloat>(F(v), 0), hh); };
-    const CGFloat rx[4] = {clampx(rad.top_left_x), clampx(rad.top_right_x), clampx(rad.bottom_right_x), clampx(rad.bottom_left_x)};
-    const CGFloat ry[4] = {clampy(rad.top_left_y), clampy(rad.top_right_y), clampy(rad.bottom_right_y), clampy(rad.bottom_left_y)};
-    CGFloat length = 2 * (r.size.width + r.size.height);
-    for(int i = 0; i < 4; i++)
-    {
-        const CGFloat a = rx[i], b = ry[i];
-        length -= a + b;
-        length += M_PI / 4 * (3 * (a + b) - std::sqrt((3 * a + b) * (a + 3 * b)));
-    }
-    return length;
 }
 
 static lh::margins Uniform(CGFloat v)
@@ -252,6 +234,7 @@ static CGFloat RoundedRectLength(CGRect r, const lh::border_radiuses& rad)
     return length;
 }
 
+#if TARGET_OS_OSX
 struct BorderDash
 {
     bool    solid = true;
@@ -317,6 +300,8 @@ static void ApplyBorderDash(CGContextRef ctx, const BorderDash& dash)
     else
         CGContextSetLineDash(ctx, 0, dash.intervals, 2);
 }
+
+#endif
 
 static bool InsideRoundedRect(CGRect r, const lh::border_radiuses& rad, CGRect b)
 {
@@ -1792,7 +1777,11 @@ static CTFontRef ResolveFont(const std::string& families, CGFloat size, int cssW
 }
 #endif
 
+#if TARGET_OS_OSX
 NSFont* LHResolveFont(NSString* families, CGFloat size, int weight, bool italic)
+#else
+CTFontRef LHResolveFont(NSString* families, CGFloat size, int weight, bool italic)
+#endif
 {
     return ResolveFont(families.UTF8String ?: "", size, weight, italic);
 }
@@ -4166,10 +4155,23 @@ void LHContainer::draw_borders(lh::uint_ptr hdc, const lh::borders& borders, con
         CGRect           midRect = CGRectInset(outer, w / 2, w / 2);
         CGMutablePathRef mid     = CGPathCreateMutable();
         AddRoundedRect(mid, midRect, mrad);
+#if TARGET_OS_OSX
         BorderDash dash = BorderDashFor(std::floor(RoundedRectLength(midRect, mrad)), w, style == lh::border_style_dotted, true);
         SetStroke(ctx, borders.top.color);
         CGContextSetLineWidth(ctx, dash.round ? w : w * 2.2);
         ApplyBorderDash(ctx, dash);
+#else
+        // Telegram (VENDOR.md edit 36): Blink's metrics, fitted to the closed path.
+        const bool dotted = style == lh::border_style_dotted;
+        CGFloat    dash = 0, gap = 0;
+        const bool fits = FitDashes(RoundedRectLength(midRect, mrad), w, dotted, true, dash, gap);
+        CGFloat    dots[]   = {0, dash + gap};
+        CGFloat    dashes[] = {dash, gap};
+        SetStroke(ctx, borders.top.color);
+        CGContextSetLineWidth(ctx, w);
+        CGContextSetLineCap(ctx, dotted && fits ? kCGLineCapRound : kCGLineCapButt);
+        CGContextSetLineDash(ctx, 0, !fits ? nullptr : dotted ? dots : dashes, fits ? 2 : 0);
+#endif
         CGContextAddPath(ctx, mid);
         CGContextStrokePath(ctx);
         CGPathRelease(mid);
@@ -4259,6 +4261,7 @@ void LHContainer::draw_borders(lh::uint_ptr hdc, const lh::borders& borders, con
                 CGContextClosePath(ctx);
                 if(s.b->style == lh::border_style_dotted || s.b->style == lh::border_style_dashed)
                 {
+#if TARGET_OS_OSX
                     TWClipPath(ctx, false);
                     bool dotted = s.b->style == lh::border_style_dotted;
                     SetStroke(ctx, c);
@@ -5233,14 +5236,6 @@ void LHContainer::draw_filtered(lh::uint_ptr hdc, const lh::filter_paint& filter
         paint(hdc);
         return;
     }
-    auto saved = m_clips;
-    m_clips.clear();
-    paint(reinterpret_cast<lh::uint_ptr>(bitmap));
-    m_clips = saved;
-    CGImageRef source = CGBitmapContextCreateImage(bitmap);
-    CGContextRelease(bitmap);
-    CGImageRef filtered = LHCreateFilteredImage(source, *filter.steps, std::max(target.sx, target.sy), target.flipped, false, space);
-    CGImageRelease(source);
     if(filtered)
     {
         CGContextSaveGState(ctx);

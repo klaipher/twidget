@@ -34,8 +34,12 @@ CGImageRef LHCopyImageForURL(NSString* url) CF_RETURNS_RETAINED;
 CGSize LHImageSizeForURL(NSString* url);
 void LHSetPortableSymbols(bool portable);
 bool LHPortableSymbols(void);
+#if TARGET_OS_OSX
 @class NSFont;
 NSFont* LHResolveFont(NSString* families, CGFloat size, int weight, bool italic);
+#else
+CTFontRef LHResolveFont(NSString* families, CGFloat size, int weight, bool italic) CF_RETURNS_RETAINED;
+#endif
 #if !TARGET_OS_OSX
 // iOS: NSValue's rect, size and point boxing (valueWithRect:, rectValue, ...) is AppKit's; these box
 // the same CGRect/CGSize/CGPoint bytes those carry on macOS. Swift reads one with getValue(_:).

@@ -1315,7 +1315,11 @@ static std::string MasterWithCSS(NSString *css)
     return LHContainer::cached_font_count();
 }
 
+#if TARGET_OS_OSX
 + (NSFont *)fontForFamilies:(NSString *)families size:(CGFloat)size weight:(NSInteger)weight italic:(BOOL)italic
+#else
++ (CTFontRef)fontForFamilies:(NSString *)families size:(CGFloat)size weight:(NSInteger)weight italic:(BOOL)italic
+#endif
 {
     return LHResolveFont(families, size, (int)weight, italic);
 }
@@ -1385,7 +1389,11 @@ static std::string MasterWithCSS(NSString *css)
         return nil;
     NSMutableArray<NSValue *> *rects = [NSMutableArray arrayWithCapacity:regions.size()];
     for(const auto &region : regions)
+#if TARGET_OS_OSX
         [rects addObject:[NSValue valueWithRect:NSMakeRect(region.x.value(), region.y.value(), region.width.value(), region.height.value())]];
+#else
+        [rects addObject:LHValueWithRect(CGRectMake(region.x.value(), region.y.value(), region.width.value(), region.height.value()))];
+#endif
     return rects;
 }
 
@@ -1449,7 +1457,11 @@ static std::string MasterWithCSS(NSString *css)
         }
         if(CGRectIsEmpty(box))
             continue;
+#if TARGET_OS_OSX
         [rects addObject:[NSValue valueWithRect:NSRectFromCGRect(CGRectInset(box, -1, -1))]];
+#else
+        [rects addObject:LHValueWithRect(CGRectInset(box, -1, -1))];
+#endif
     }
     return rects;
 }
@@ -1950,7 +1962,11 @@ static std::string MasterWithCSS(NSString *css)
     if(!ri)
         return result;
     const CGAffineTransform transform = VisualTransform(ri.get());
+#if TARGET_OS_OSX
     VisitLineBoxes(ri.get(), [&](CGRect line) { [result addObject:[NSValue valueWithRect:NSRectFromCGRect(CGRectApplyAffineTransform(line, transform))]]; });
+#else
+    VisitLineBoxes(ri.get(), [&](CGRect line) { [result addObject:LHValueWithRect(CGRectApplyAffineTransform(line, transform))]; });
+#endif
     return result;
 }
 
@@ -3630,11 +3646,7 @@ static std::string LHCustomPropertyText(const lh::css_token_vector &tokens)
                 const lh::position pos = ri->pos();
                 const CGRect       box = CGRectIsNull(fragments) ? CGRectMake(p.x.value(), p.y.value(), 0, 0)
                                                                  : CGRectOffset(fragments, p.x.value() - pos.x.value(), p.y.value() - pos.y.value());
-                auto it = boxes.find(value);
-                if(it == boxes.end())
-                    boxes.emplace(value, box);
-                else
-                    it->second = CGRectUnion(it->second, box);
+                visitor(value, box);
                 for(const auto &child : ri->children())
                     visit(child, matrix);
                 return;

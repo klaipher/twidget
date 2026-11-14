@@ -3,6 +3,7 @@
 #include "element.h"
 #include "render_item.h"
 #include "document.h"
+#include "document_container.h"
 #include "el_text.h"
 #include "types.h"
 #include <algorithm>

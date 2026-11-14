@@ -71,7 +71,16 @@ Ours: branch `nanogram`, used by Nanogram for iOS, macOS and Android. History: [
 - Stricter cap wins: edit 14 (component nesting 64), 15 (list caps), 10 (text pieces), 19, 21 (style bytes) and the
   gumbo limits are the iOS values, since this branch had none of them; where this branch has its own cap (the var()
   token budget 16,384, calc 16,384 expressions, `<use>` depth 8) both apply.
-- This branch was assembled without a compiler: it needs the build and test run below before it ships.
+- Syntax check (2026-11-14, `clang -fsyntax-only` per translation unit, no app or package build): every file the iOS BUILD
+  and Package.swift compile now parses and type-checks clean for macOS (arm64, 13.0) and iOS (arm64, 15.0): the Apple layer
+  (8 `.mm`, `core/lhx_sanitizer.cpp`), `litehtml/src` (65 `.cpp`), gumbo (11 `.c`), `twa_icons.cpp`, and the 9 LiteHTML test
+  suites the iOS app shares (macOS: all 30). The Swift targets pass `swiftc -parse` on both SDKs. The merge had left: a
+  stray `#import <Cocoa/Cocoa.h>` ahead of its guard in 5 Apple files, a duplicated `RoundedRectLength`, an unbalanced
+  `#else` in the dashed-border code (iOS keeps edit 36's Blink metrics, macOS its `BorderDash`, each under
+  `TARGET_OS_OSX`), `NSFont` and `NSValue` rect API unguarded for iOS, `document.cpp` with three pieces of the macOS
+  version spliced into iOS functions and four macOS members and helpers dropped (`m_gumbo`, `m_track_nodes`,
+  `m_node_elements`, `tree_neutral_change`, `table_part`, `restylable_in_place`), a missing include in `line_box.cpp` and a
+  doubled declaration in `style.cpp`. Not run: any link, test or app build.
 
 ### Build and test steps still owed
 - iOS: the combined iOS build, the 10 twidget/gumbo cc_tests, TwidgetRenderingTests, FidelityRenderTests, WidgetRuntime tests.
