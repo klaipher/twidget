@@ -4,6 +4,7 @@ Branch `nanogram`. Base: Telegram's 4769d72. Newest first.
 
 ## Unreleased
 
+- Apple layer and litehtml (repair): dotted and dashed side borders clip to the side on iOS as well (the clip had moved under the macOS-only branch), and `document::apply_template_values` and `update_structure` rebuild the render tree again when the patch cannot keep it (the merge had dropped the macOS tail of `restyle_after_patch`; the iOS `commit_patch` path is unchanged).
 - Apple layer and litehtml: the merge of the iOS app's edits now compiles for iOS and macOS (syntax-checked per file): imports and guards of Cocoa, the iOS and macOS dash metrics for dashed borders, iOS spellings of the font and rect API, and the splices the merge left in `document.cpp`.
 - litehtml: UAX #9 bidi through the host (`document_container::bidi_levels`, rule L2) when the host answers; the simplified first-strong-character reordering remains the fallback.
 - litehtml: the calc() registry holds 16,384 distinct expressions per process (was 4,096).

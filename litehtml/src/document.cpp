@@ -1598,6 +1598,8 @@ namespace litehtml
         if(!allow_shallow_width || !keep_tree || !new_text.empty())
             shallow_width.clear();
         restyle_after_patch(restyle, new_text, keep_tree, retext, background_only, patched, shallow_width);
+        if(!keep_tree || !m_root_render)
+            replace_root_render();
         for(size_t k = 0; k < measured.size() && paint_only; k++)
         {
             size after;
@@ -3575,6 +3577,8 @@ namespace litehtml
             for(const auto& el : fresh)
                 el->apply_stylesheet(m_user_css);
             restyle_after_patch(restyle, created, keep_tree, retext);
+            if(!keep_tree || !m_root_render)
+                replace_root_render();
             if(keep_tree)
                 forget_positions();
             m_over_element   = nearest_attached(over_chain);

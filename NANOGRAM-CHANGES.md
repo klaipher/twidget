@@ -66,13 +66,14 @@ Ours: branch `nanogram`, used by Nanogram for iOS, macOS and Android. History: [
     values could still turn calc() off for widgets created later until the app restarts. Per-document ownership needs
     a reference count in `css_length` and a build to prove it; it is the follow-up if this limit is ever reached.
   - The `calc_node::live()`, `css_length::is_calc()` and `litehtml::calc_fonts()` test hooks of the iOS `fork_test.cpp`
-    do not exist here (the calc tree is file-local), so those test blocks are dropped from the iOS repository, and the
-    conformance and Twidget counts are rebaselined there.
+    do not exist here (the calc tree is file-local), so the first edit 48 block of the iOS `fork_test.cpp` (the
+    calc_node, is_calc, calc_value and calc_fonts checks) is dropped from the iOS repository, and the conformance and
+    Twidget counts are rebaselined there. Its tabular-nums check reads the `tnum` feature of the font description.
 - Stricter cap wins: edit 14 (component nesting 64), 15 (list caps), 10 (text pieces), 19, 21 (style bytes) and the
   gumbo limits are the iOS values, since this branch had none of them; where this branch has its own cap (the var()
   token budget 16,384, calc 16,384 expressions, `<use>` depth 8) both apply.
 - Syntax check (2026-11-14, `clang -fsyntax-only` per translation unit, no app or package build): every file the iOS BUILD
-  and Package.swift compile now parses and type-checks clean for macOS (arm64, 13.0) and iOS (arm64, 15.0): the Apple layer
+  and Package.swift compile, including the host test `fork_test.cpp` of the iOS repository, now parses and type-checks clean for macOS (arm64, 13.0) and iOS (arm64, 15.0): the Apple layer
   (8 `.mm`, `core/lhx_sanitizer.cpp`), `litehtml/src` (65 `.cpp`), gumbo (11 `.c`), `twa_icons.cpp`, and the 9 LiteHTML test
   suites the iOS app shares (macOS: all 30). The Swift targets pass `swiftc -parse` on both SDKs. The merge had left: a
   stray `#import <Cocoa/Cocoa.h>` ahead of its guard in 5 Apple files, a duplicated `RoundedRectLength`, an unbalanced

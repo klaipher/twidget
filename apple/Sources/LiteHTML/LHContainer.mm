@@ -4261,8 +4261,8 @@ void LHContainer::draw_borders(lh::uint_ptr hdc, const lh::borders& borders, con
                 CGContextClosePath(ctx);
                 if(s.b->style == lh::border_style_dotted || s.b->style == lh::border_style_dashed)
                 {
-#if TARGET_OS_OSX
                     TWClipPath(ctx, false);
+#if TARGET_OS_OSX
                     bool dotted = s.b->style == lh::border_style_dotted;
                     SetStroke(ctx, c);
                     if(HasRadius(orad))
