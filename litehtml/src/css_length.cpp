@@ -28,8 +28,10 @@ namespace litehtml
             std::vector<int8_t>    signs;
         };
 
-        // Expressions are few (a widget's stylesheets, after unit conversion) and live as long as the process.
-        constexpr size_t      MAX_EXPRESSIONS = 4096;
+        // Expressions are few (a widget's stylesheets, after unit conversion) and live as long as the process, shared by
+        // every document, so the ceiling is a process-wide one: 16,384 distinct expressions (about 2 MB at most). Past it
+        // new expressions are refused (the declaration is dropped); expressions already interned keep working.
+        constexpr size_t      MAX_EXPRESSIONS = 16384;
         std::mutex&           calc_mutex() { static std::mutex& m = *new std::mutex; return m; }
         std::vector<calc_node>& calc_table() { static auto& t = *new std::vector<calc_node>; return t; }
         std::unordered_map<std::string, int>& calc_index() { static auto& i = *new std::unordered_map<std::string, int>; return i; }
