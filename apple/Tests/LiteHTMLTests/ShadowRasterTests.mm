@@ -39,6 +39,7 @@ static LHDocument *ShadowDocument(NSString *style)
 {
     unsetenv("LH_NO_SHADOW_SLICES");
     unsetenv("LH_NO_SHADOW_RESIZE_CACHE");
+    unsetenv("LH_EXACT_SHADOWS");
     [LHDocument purgeCaches];
     [super tearDown];
 }
@@ -266,6 +267,31 @@ static LHDocument *ShadowDocument(NSString *style)
             XCTAssertEqual([LHDocument rasterCacheBytes], downsampledBytes, @"flipped=%d", flipped);
             XCTAssertEqualObjects(warm, cold, @"flipped=%d", flipped);
         }
+}
+
+// Telegram (VENDOR.md edit 65), as in Nanogram iOS's copy of this suite: the low-resolution raster of a blur past 24
+// device pixels against the exact one (LH_EXACT_SHADOWS: full resolution), for a still, a moved, a turned, an inset, a
+// spread, a rounded and a layered shadow, 8 levels apart at most. The turned one guards the exact path: a raster the
+// cache cannot hold (a turned CTM) is painted directly, not downsampled a second way (it was 11 apart at 3x then).
+- (void)testBlurredShadowsStayCloseToTheExactOnes
+{
+    for(CGFloat scale : {2.0, 3.0})
+        for(NSString *variant in @[@"", @"transform:translate(.3px,.7px)", @"transform:rotate(3deg)", @"box-shadow:0 6px 40px #0008 inset;background:#fff", @"box-shadow:0 0 55px 6px #e0267480", @"border-radius:80% 20% / 30% 65%;box-shadow:12px -9px 28px #1686c8", @"background:#751778;box-shadow:0 0 25px #e0267480,0 0 55px #e0267440,0 12px 25px #0008"])
+            @autoreleasepool
+            {
+                [LHDocument purgeCaches];
+                LHDocument *document = ShadowDocument(variant);
+                setenv("LH_EXACT_SHADOWS", "1", 1);
+                NSData *expected = RenderShadow(document, CGRectMake(0, 0, 640, 420), scale);
+                unsetenv("LH_EXACT_SHADOWS");
+                NSData *actual = RenderShadow(document, CGRectMake(0, 0, 640, 420), scale);
+                XCTAssertEqual(expected.length, actual.length);
+                const uint8_t *a = (const uint8_t *)expected.bytes, *b = (const uint8_t *)actual.bytes;
+                NSUInteger frameMaximum = 0;
+                for(NSUInteger i = 0; i < actual.length; i++)
+                    frameMaximum = MAX(frameMaximum, (NSUInteger)abs((int)a[i] - (int)b[i]));
+                XCTAssertLessThanOrEqual(frameMaximum, variant.length == 0 || [variant hasPrefix:@"transform"] ? 2u : 8u, @"scale %g %@", scale, variant);
+            }
 }
 
 @end

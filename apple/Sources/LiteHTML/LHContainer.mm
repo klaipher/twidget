@@ -4538,25 +4538,11 @@ void LHContainer::draw_box_shadow(lh::uint_ptr hdc, const lh::position& box, con
         const CGSize keySize = getenv("LH_NO_SHADOW_RESIZE_CACHE") ? r.size : compact.size;
         AppendNumber(rasterKey, keySize.width);
         AppendNumber(rasterKey, keySize.height);
+        // A raster the cache cannot hold (a turned or skewed CTM, a fractional device rect) is painted directly below.
+        // No downsampled fallback here: a blur past 24 device pixels takes the branch above unless LH_EXACT_SHADOWS asks
+        // for full resolution, and DrawDownsampled declines any smaller one, so a fallback only ever ran under
+        // LH_EXACT_SHADOWS, where it made the "exact" reference of a turned shadow a second low-resolution raster.
         bool drawn = DrawRasterized(ctx, aligned, rasterKey, [&](CGContextRef bitmap) { paint_box_shadow(bitmap, compact, radius, copy); }, true, stretchX, stretchY);
-        if(!drawn)
-        {
-            CGContextSaveGState(ctx);
-            CGMutablePathRef clip = CGPathCreateMutable();
-            if(!shadow.inset)
-                CGPathAddRect(clip, nullptr, CGRectInset(ink, -1, -1));
-            AddRoundedRect(clip, r, radius);
-            CGContextAddPath(ctx, clip);
-            if(shadow.inset)
-                TWClipPath(ctx, false);
-            else
-                TWClipPath(ctx, true);
-            CGPathRelease(clip);
-            AppendNumber(key, r.size.width);
-            AppendNumber(key, r.size.height);
-            drawn = DrawDownsampled(ctx, aligned, key + "|down", blur, [&](CGContextRef bitmap) { paint_box_shadow(bitmap, r, radius, copy); });
-            CGContextRestoreGState(ctx);
-        }
         CGContextRestoreGState(ctx);
         if(drawn)
             return;
