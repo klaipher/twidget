@@ -3883,6 +3883,7 @@ namespace litehtml
             m_style_pass_limits.clear();
             m_recording_style_pass = true;
             m_generated_transient  = 0;
+            m_walk_text_limited    = m_text_limited; // the text the walk made, cut or not, before any generated content
             // apply master CSS
             m_root->apply_stylesheet(m_master_css);
 

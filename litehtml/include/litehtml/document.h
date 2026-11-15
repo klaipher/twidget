@@ -300,6 +300,9 @@ namespace litehtml
         int                                     m_style_sheet    = 0;
         mutable long long                       m_style_rule_bytes = -1; // the payload of the largest value of each property in the author and user sheets
         bool                                    m_text_limited   = false;
+        // Telegram (VENDOR.md edit 84): whether the document's own text was cut at the cap before its first style pass
+        // (the parse, or the caller's walk of an external DOM), which replay_generated_content starts the flag from.
+        bool                                    m_walk_text_limited = false;
         int                                     m_text_allowance = 0;
         // Telegram (VENDOR.md edit 16): a text patch session, from the first replace_text to commit_patch. The base is
         // m_text_elements when it began and the growth the net pieces added since, which the cap counts (the replaced

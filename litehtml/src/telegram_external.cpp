@@ -550,6 +550,19 @@ namespace litehtml
         if(m_patch_counters)
             rerun_counters();
         m_patch_counters = false;
+        // Telegram (VENDOR.md edit 21): an element the session matched again (its attributes, the environment's reach) and
+        // then removed, itself or with an ancestor (a removal, a move), left the tree with its style charges given back
+        // (remove_child). It is not restyled, as a subtree inserted and removed again is not styled above: its compute
+        // would charge its var() splices again (a shorthand keeps its var() tokens, so every compute splices them anew),
+        // held by an element no longer in the tree, and the style bytes would stay above a rebuild's.
+        m_patch_restyle.erase(std::remove_if(m_patch_restyle.begin(), m_patch_restyle.end(),
+                                             [this](const element::ptr& el) {
+                                                 element::ptr top = el;
+                                                 while(top && top != m_root)
+                                                     top = top->parent();
+                                                 return top != m_root;
+                                             }),
+                              m_patch_restyle.end());
         // Telegram (VENDOR.md edit 84): near a cap the session's generated content may be cut where a fresh build would not
         // cut it: the style pass again, from zero in a build's order.
         const bool restyling     = !m_patch_restyle.empty() || !fresh.empty() || !new_text.empty();
@@ -2604,8 +2617,10 @@ namespace litehtml
             }
             states.push_back(rematch_begin(e, true, tag->attributes()));
         }
-        // The caps from zero, as a build's matching starts them, and the replay's steps within its limit.
-        m_text_limited   = false;
+        // The caps from zero, as a build's matching starts them, and the replay's steps within its limit. The text cap's flag
+        // starts where a build's matching starts it: set when the document's own text was cut before it (its walk, which a
+        // patch's text and structure changes, refused past the cap, never cut again).
+        m_text_limited   = m_walk_text_limited;
         m_pseudo_limited = false;
         m_style_bytes    = 0;
         m_style_limited  = false;
