@@ -59,6 +59,11 @@ namespace litehtml
         // text in UTF-8 (U+FFFC for an atomic inline), in a paragraph of direction `rtl`. False, or levels of another
         // size, keeps the logical order.
         virtual bool bidi_levels(const std::vector<std::string>& runs, bool rtl, std::vector<uint8_t>& levels) { return false; }
+        // Nanogram fork: when bidi_levels gives no levels, the fork's simplified reordering (a word is right to left by
+        // its first strong character; line_box::reorder_bidi_fallback) instead of the logical order. A host without a
+        // UAX #9 implementation of its own (macOS LHContainer, TwidgetCore) returns true; the default keeps upstream's
+        // logical order, which iOS WidgetRuntime, answering bidi_levels itself, relies on.
+        virtual bool reorder_bidi_by_first_strong_character() const { return false; }
         virtual void               draw_text(litehtml::uint_ptr hdc, const char* text, litehtml::uint_ptr hFont,
                                              litehtml::web_color color, const litehtml::position& pos)              = 0;
         // Nanogram fork: word-spacing on every word separator (U+0020 and U+00A0, CSS Text 3 §8.1), preserved spaces

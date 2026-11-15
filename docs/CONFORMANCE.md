@@ -113,7 +113,7 @@ message-list integration and live bot delivery need their own checks.
 | Empty auto table cells share the spare width | the fork's `table_grid::calc_table_width` |
 | `word-break` (`break-all`, `break-word`) | the fork's `css_properties::get_wrapping` |
 | `open-quote` / `close-quote` from `quotes`, and `<q>` marks | the fork's `el_before_after_base::add_quote`, `UA_EXTRA` |
-| `direction` and `dir` (`auto` too): right to left lines, alignment, blocks, and a simplified bidi that keeps embedded runs in their order | the fork's `line_box::reorder_bidi`, `render_block_context` |
+| `direction` and `dir` (`auto` too): right to left lines, alignment, blocks, and a simplified bidi that keeps embedded runs in their order | the fork's `line_box::reorder_bidi` (the host's UAX #9 levels, else the simplified reordering for a host that opts in: `reorder_bidi_by_first_strong_character`), `render_block_context` |
 | `:lang()` on the nearest `lang`, `:empty` | the fork's `html_tag::select_pseudoclass` |
 | The `translate`, `rotate` and `scale` properties | the fork's `css_properties::compute_transform` |
 | `letter-spacing` and `word-spacing`, a no-break space widened inside its word too | `Container` (`spacing_units`, `spacing_words`), the fork's `font_description` |

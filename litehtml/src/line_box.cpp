@@ -957,8 +957,9 @@ void litehtml::line_box::reorder_bidi()
     std::vector<uint8_t> levels;
     if(!doc || !doc->container()->bidi_levels(texts, m_rtl, levels) || levels.size() != units.size())
     {
-        // Fork fallback: a host without bidi_levels still gets right to left words in the right order.
-        reorder_bidi_fallback();
+        // No levels: the logical order (upstream), or the fork's simplified reordering for a host that asks for it.
+        if(doc && doc->container()->reorder_bidi_by_first_strong_character())
+            reorder_bidi_fallback();
         return;
     }
     // L2: from the highest level to the lowest odd one, reverse every run of units at that level or higher.
@@ -1212,10 +1213,9 @@ std::list<std::unique_ptr<litehtml::line_box_item>> litehtml::line_box::new_widt
     return ret_items;
 }
 
-// UAX #9 through the host: one unit per content item (a word or an atomic inline), with the inline start and
-// continuation edges before it and the end edges after it, so an inline's edges travel with its first and last
-// content. The units are laid again in visual order (rule L2) inside the extent the line was laid out in; a right to
-// left paragraph is mirrored across the line first, as in the fallback. False leaves the line untouched.
+// Nanogram fork: the simplified reordering for a host that gives no bidi levels and opts in
+// (document_container::reorder_bidi_by_first_strong_character). A right to left line, already aligned, is mirrored
+// across its items' own extent; then each run of the other direction is mirrored in place.
 void litehtml::line_box::reorder_bidi_fallback()
 {
     // Each word is an item, and the shaper lays out the characters inside one: what is left is the order of
@@ -1230,7 +1230,7 @@ void litehtml::line_box::reorder_bidi_fallback()
     if(!m_rtl && std::none_of(m_items.begin(), m_items.end(), [&](const auto& lbi) { return direction_of(*lbi) > 0; }))
         return;
     // reorder_bidi() (host levels) is tried first; this simplified reordering is the fallback for a host that does not
-    // answer.
+    // answer and asks for it.
     std::vector<line_box_item*> items;
     std::vector<int8_t>         dirs;
     items.reserve(m_items.size());

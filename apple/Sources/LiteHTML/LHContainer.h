@@ -191,6 +191,9 @@ class LHContainer : public litehtml::document_container
     // Nanogram fork: collapsed table borders resolved and painted after the cells, so a selection highlight on a cell
     // keeps its neighbours' borders (CollapsedTableBorderTests).
     bool paint_collapsed_borders_over_cells() const override { return true; }
+    // Nanogram fork: no bidi_levels here, so right to left words are ordered by the simplified first-strong-character
+    // reordering, as before the 13.2 merge (litehtml's default keeps the logical order).
+    bool reorder_bidi_by_first_strong_character() const override { return true; }
     void suspend_clips() override;
     void resume_clips() override;
     void end_group(litehtml::uint_ptr hdc) override;

@@ -4,6 +4,7 @@
 
 #include <litehtml/html_tag.h>
 
+#include <cmath>
 #include <string>
 
 static int failures = 0;
@@ -81,10 +82,41 @@ static void testCollapsedBordersFollowTheHostsChoice() {
     }
 }
 
+struct FirstStrongBidiContainer : litehtml_test::TestContainer {
+    bool reorder_bidi_by_first_strong_character() const override { return true; }
+};
+
+// Without bidi_levels a line keeps its logical order (upstream's default hook, which iOS WidgetRuntime replaces with its
+// own levels); a host that opts in (macOS LHContainer, TwidgetCore) gets the fork's simplified reordering, a word right
+// to left by its first strong character, as before the 13.2 merge.
+static void testBidiFallbackFollowsTheHostsChoice() {
+    static const char* kRtlBoxes = "<body style='margin:0'><div style='direction:rtl;width:200px'>"
+                                   "<i id=a style='display:inline-block;width:10px;height:8px'></i>"
+                                   "<i id=b style='display:inline-block;width:10px;height:8px'></i></div>"
+                                   "<div style='width:200px'><span id=h>\xd7\xa9\xd7\x9c</span> <span id=w>\xd7\x9d\xd7\x95</span></div></body>";
+    const auto x = [](const litehtml::document::ptr& doc, const char* id) {
+        const auto el = by_id(doc, id);
+        return float((el->children().empty() ? el : el->children().front())->get_placement().x);
+    };
+    {
+        litehtml_test::TestContainer c;
+        auto doc = litehtml_test::layout(c, kRtlBoxes);
+        CHECK(std::abs(x(doc, "a") - 180.0f) < 0.5f && std::abs(x(doc, "b") - 190.0f) < 0.5f);
+        CHECK(x(doc, "h") < x(doc, "w"));
+    }
+    {
+        FirstStrongBidiContainer c;
+        auto doc = litehtml_test::layout(c, kRtlBoxes);
+        CHECK(std::abs(x(doc, "a") - 190.0f) < 0.5f && std::abs(x(doc, "b") - 180.0f) < 0.5f);
+        CHECK(x(doc, "h") > x(doc, "w"));
+    }
+}
+
 int main() {
     testAnUnresolvedVarUnsetsTheDeclaration();
     testDirAutoFollowsHtmlAndYieldsToADeclaration();
     testCollapsedBordersFollowTheHostsChoice();
+    testBidiFallbackFollowsTheHostsChoice();
     std::printf("%s (%d failed)\n", failures ? "FAILED" : "OK", failures);
     return failures ? 1 : 0;
 }
