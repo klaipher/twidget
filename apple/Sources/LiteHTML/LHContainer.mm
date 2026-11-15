@@ -4226,7 +4226,7 @@ void LHContainer::draw_borders(lh::uint_ptr hdc, const lh::borders& borders, con
             {
                 const lh::border* b;
                 CGFloat           w;
-                CGPoint           poly[5];
+                CGPoint           poly[4];
                 CGPoint           a, z;
                 bool              topLeft;
             } list[4] = {
@@ -4260,7 +4260,9 @@ void LHContainer::draw_borders(lh::uint_ptr hdc, const lh::borders& borders, con
                     continue;
                 CGContextSaveGState(ctx);
                 CGContextBeginPath(ctx);
-                CGContextAddLines(ctx, s.poly, 5);
+                // Four corners: a fifth point (the array once had five) was (0, 0), which pulled each side's polygon to
+                // the context origin and let the right side paint over the top one in a rounded ring.
+                CGContextAddLines(ctx, s.poly, 4);
                 CGContextClosePath(ctx);
                 if(s.b->style == lh::border_style_dotted || s.b->style == lh::border_style_dashed)
                 {

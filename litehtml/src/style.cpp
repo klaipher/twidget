@@ -3096,13 +3096,16 @@ namespace litehtml
         return true;
     }
 
-    // false when the substitution ran over max_var_substitution_tokens, or met a property that did
+    // false when the substitution ran over max_var_substitution_tokens, met a property that did, or left a var()
+    // unresolved (no such property and no fallback, a cycle, bad syntax): Telegram (VENDOR.md edit 57) makes such a
+    // declaration invalid at computed-value time, so subst_vars unsets it (and a shorthand's longhands) instead of
+    // keeping the unsubstituted tokens, which dropped it and let an earlier declaration stand.
     bool subst_vars_(string_id name, css_token_vector& tokens, const html_tag* el)
     {
         std::set<string_id> chain = {name};
         var_budget          budget;
-        resolve_vars(tokens, el, chain, 0, budget);
-        return !budget.invalid;
+        const bool          resolved = resolve_vars(tokens, el, chain, 0, budget);
+        return resolved && !budget.invalid;
     }
 
     void style::subst_vars(const html_tag* el)

@@ -188,6 +188,9 @@ class LHContainer : public litehtml::document_container
     void begin_group(litehtml::uint_ptr hdc, const litehtml::paint_group& group) override;
     void draw_path(litehtml::uint_ptr hdc, const litehtml::vector_path& path) override;
     void draw_path_stroke_gradient(litehtml::uint_ptr hdc, const litehtml::vector_path& path, const litehtml::svg_gradient& stroke) override;
+    // Nanogram fork: collapsed table borders resolved and painted after the cells, so a selection highlight on a cell
+    // keeps its neighbours' borders (CollapsedTableBorderTests).
+    bool paint_collapsed_borders_over_cells() const override { return true; }
     void suspend_clips() override;
     void resume_clips() override;
     void end_group(litehtml::uint_ptr hdc) override;

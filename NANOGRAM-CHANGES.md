@@ -96,6 +96,14 @@ Ours: branch `nanogram`, used by Nanogram for iOS, macOS and Android. History: [
   `has_viewport_units` has no caller now. tests/core_tests.cpp and tests/apple_tests.cpp were not run.
 - Not run: any build, link or test; syntax checks only.
 
+### Collapsed table borders are a host choice
+- What: `document_container::paint_collapsed_borders_over_cells()` (default false = upstream: cells paint their own
+  borders). `apple/` LHContainer and `core/` return true and get the fork's CSS 2.1 §17.6.2.1 resolution with the
+  borders painted after the cells. iOS WidgetRuntime keeps the default: its paint_visitor walk must see every draw
+  inside a visited paint.
+- Also: an unresolved `var()` unsets its declaration (upstream edit 57 again), and `dir=auto` yields to a declared
+  `direction` (iOS WidgetRuntime declares the direction it resolves from its DOM).
+
 ### Build and test steps still owed
 - iOS: the combined iOS build, the 10 twidget/gumbo cc_tests, TwidgetRenderingTests, FidelityRenderTests, WidgetRuntime tests.
 - macOS: the Mac app build; apple/Tests (V030LayoutTests, CanvasSizingTests, WidgetSafeAreaTests, WidgetPaintPolicyTests).

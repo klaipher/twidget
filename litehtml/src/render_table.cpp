@@ -1,5 +1,6 @@
 #include "render_table.h"
 #include "document.h"
+#include "document_container.h"
 #include "iterators.h"
 #include <cmath>
 
@@ -122,7 +123,9 @@ litehtml::rendered_width litehtml::render_item_table::_render(pixel_t x, pixel_t
 
     containing_block_context self_size = calculate_containing_block_context(containing_block_size);
 
-    if(src_el()->css().get_border_collapse() == border_collapse_collapse)
+    // Nanogram fork: only for a host that paints collapsed borders over the cells (document_container).
+    if(src_el()->css().get_border_collapse() == border_collapse_collapse &&
+       src_el()->get_document()->container()->paint_collapsed_borders_over_cells())
     {
         resolve_collapsed_borders();
     }
@@ -615,7 +618,9 @@ void litehtml::render_item_table::draw_children(uint_ptr hdc, pixel_t x, pixel_t
     pos.y        += y;
     document*      doc        = src_el()->doc_ptr();
     const bool     cull       = clip && doc->culls_paint();
-    const bool     collapsed  = css().get_border_collapse() == border_collapse_collapse;
+    // Nanogram fork: the host's choice (document_container::paint_collapsed_borders_over_cells).
+    const bool     collapsed  = css().get_border_collapse() == border_collapse_collapse &&
+                                doc->container()->paint_collapsed_borders_over_cells();
     const uint32_t generation = doc->paint_generation();
     for(auto& caption : m_grid->captions())
     {

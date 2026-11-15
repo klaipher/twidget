@@ -66,6 +66,13 @@ namespace litehtml
         // widened in layout and is handed such a run's word-spacing in draw_spaced_text, to place its pieces; the
         // default keeps upstream's behaviour.
         virtual bool word_spacing_on_every_separator() const { return false; }
+        // Nanogram fork: collapsed table borders (border-collapse: collapse) resolved as CSS 2.1 §17.6.2.1 says (the
+        // wider, then the stronger style, then the left or top cell; render_item::collapse_skip) and painted by the
+        // table after all of its cells, so a cell's background or highlight never covers a neighbour's border. A host
+        // that returns true gets that; the default keeps upstream's painting (each cell draws its own borders in its
+        // own paint, the table its own), which a paint_visitor walk sees whole: the table's later pass is not a
+        // visited paint, so a host mirroring the walk (iOS WidgetRuntime) must not opt in.
+        virtual bool paint_collapsed_borders_over_cells() const { return false; }
         virtual void draw_spaced_text(litehtml::uint_ptr hdc, const char* text, litehtml::uint_ptr hFont,
                                       litehtml::web_color color, const litehtml::position& pos, pixel_t /*word_spacing*/)
         {

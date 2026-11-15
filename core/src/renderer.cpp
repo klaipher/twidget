@@ -1330,6 +1330,8 @@ public:
     // litehtml widens every space and no-break space by word-spacing in layout (preserved ones too), and hands the
     // run's word-spacing here, so that its pieces are painted where layout put them.
     bool word_spacing_on_every_separator() const override { return true; }
+    // Collapsed table borders resolved per CSS 2.1 §17.6.2.1 and painted after the cells, as before the 13.2 merge.
+    bool paint_collapsed_borders_over_cells() const override { return true; }
     void draw_spaced_text(litehtml::uint_ptr, const char* text, litehtml::uint_ptr h, litehtml::web_color color, const litehtml::position& pos,
                           litehtml::pixel_t word_spacing) override {
         paint_text(text, h, color, pos, float(word_spacing));

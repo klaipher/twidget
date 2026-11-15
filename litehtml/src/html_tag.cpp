@@ -1988,8 +1988,11 @@ namespace litehtml
                     }
                 }
 
+                // Nanogram fork: a collapsed table's own borders come after its cells (render_item_table::draw_children)
+                // when the host asks for it.
                 const bool collapsed_table = (m_css.get_display() == display_table || m_css.get_display() == display_inline_table) &&
-                                             m_css.get_border_collapse() == border_collapse_collapse;
+                                             m_css.get_border_collapse() == border_collapse_collapse &&
+                                             doc_ptr()->container()->paint_collapsed_borders_over_cells();
                 if(!ri->defer_borders && !collapsed_table)
                 {
                     ri->draw_borders(hdc, border_box);

@@ -161,6 +161,13 @@ if(TWIDGET_BUILD_TESTS)
         target_compile_options(twidget_paint_exclusion_rules_tests PRIVATE /utf-8)
     endif()
     add_test(NAME twidget_core COMMAND twidget_core_tests)
+    # litehtml alone, on a deterministic container: computed values and paint order the hosts rely on.
+    add_executable(twidget_litehtml_tests "${CMAKE_CURRENT_SOURCE_DIR}/tests/litehtml_tests.cpp")
+    target_link_libraries(twidget_litehtml_tests PRIVATE litehtml)
+    if(MSVC)
+        target_compile_options(twidget_litehtml_tests PRIVATE /utf-8)
+    endif()
+    add_test(NAME twidget_litehtml COMMAND twidget_litehtml_tests)
     # The heavy-box rule against widget-sandbox's shared fixture, the one every client's renderer implements.
     add_executable(twidget_paint_policy_tests "${CMAKE_CURRENT_SOURCE_DIR}/tests/paint_policy_tests.cpp")
     target_link_libraries(twidget_paint_policy_tests PRIVATE twidget::core)

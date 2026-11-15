@@ -134,14 +134,26 @@ void litehtml::css_properties::compute(const html_tag* el, const document::ptr& 
         static_cast<text_align>(el->get_property<int>(_text_align_, true, text_align_start, offset(m_text_align)));
     // Telegram (VENDOR.md edit 46): direction (inherited); the fork's dir=auto reads the first strong character below.
     m_direction = el->get_property<int>(_direction_, true, direction_ltr, offset(m_direction));
-    if(const char* dir = el->get_attr("dir"); dir && equal_i(dir, "auto"))
+    // dir=auto is a presentational hint: a direction declared for the element itself wins (a host that resolves
+    // dir=auto from its own DOM, as iOS WidgetRuntime does with [data-tg-dir], declares the result).
+    if(const char* dir = el->get_attr("dir"); dir && equal_i(dir, "auto") && !el->has_own_property(_direction_))
     {
-        // dir=auto: the first strong character of the element's text decides.
+        // dir=auto: the first strong character of the element's text decides, skipping (HTML's auto directionality)
+        // bdi, script, style and textarea elements and every element with a dir of its own.
         std::function<int(const element*)> first_strong = [&](const element* parent) {
             for(const auto& child : parent->children())
             {
-                auto text   = dynamic_cast<const el_text*>(child.get());
-                int  strong = text ? text->strong_direction() : first_strong(child.get());
+                auto text = dynamic_cast<const el_text*>(child.get());
+                if(!text)
+                {
+                    const char* own = child->get_attr("dir");
+                    if(own && (equal_i(own, "ltr") || equal_i(own, "rtl") || equal_i(own, "auto")))
+                        continue;
+                    const string_id tag = child->tag();
+                    if(tag == _bdi_ || tag == _script_ || tag == _style_ || tag == _textarea_)
+                        continue;
+                }
+                int strong = text ? text->strong_direction() : first_strong(child.get());
                 if(strong)
                     return strong;
             }
